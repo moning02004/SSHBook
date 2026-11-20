@@ -458,3 +458,5 @@ body.dragging-tab .term-slot { pointer-events: none; }
 .kh-table td { padding: 6px; border-bottom: 1px solid var(--line-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kh-table .mono { font-family: var(--mono); }
 .kh-table .fp { font-size: 11px; }
+
+.backup-list { display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }

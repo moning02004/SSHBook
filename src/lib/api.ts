@@ -36,6 +36,13 @@ export interface KnownHost {
   fingerprint: string;
 }
 
+export interface VaultBackup {
+  path: string;
+  /** 유닉스 시각(초) */
+  modified: number;
+  size: number;
+}
+
 export interface TermLatency {
   id: string;
   ms: number;
@@ -101,6 +108,12 @@ export interface Backend {
   vaultChangePassword(oldPassword: string, newPassword: string): Promise<void>;
   vaultExport(dest: string): Promise<void>;
   vaultImport(src: string, password: string): Promise<void>;
+  /** 보관함 자동 백업 목록(새것부터) */
+  vaultBackups(): Promise<VaultBackup[]>;
+  /** 백업으로 되돌린다. 그 백업 때의 마스터 비밀번호가 필요하다 */
+  vaultRestore(backup: string, password: string): Promise<void>;
+  /** 진단 로그에 남긴다(비밀 정보는 넣지 않는다) */
+  appLog(level: "info" | "warn" | "error", message: string): Promise<void>;
   sessionsList(): Promise<Session[]>;
   sessionSave(session: Session, secret?: SecretInput): Promise<Session>;
   sessionDelete(id: string): Promise<void>;
@@ -143,6 +156,9 @@ const tauriBackend: Backend = {
   vaultChangePassword: (oldPassword, newPassword) => invoke("vault_change_password", { oldPassword, newPassword }),
   vaultExport: (dest) => invoke("vault_export", { dest }),
   vaultImport: (src, password) => invoke("vault_import", { src, password }),
+  vaultBackups: () => invoke("vault_backups"),
+  vaultRestore: (backup, password) => invoke("vault_restore", { backup, password }),
+  appLog: (level, message) => invoke("app_log", { level, message }),
   sessionsList: () => invoke("sessions_list"),
   sessionSave: (session, secret) => invoke("session_save", { session, secret: secret ?? null }),
   sessionDelete: (id) => invoke("session_delete", { id }),
@@ -250,6 +266,21 @@ function createMockBackend(): Backend {
     async vaultImport() {
       exists = true;
       unlocked = true;
+    },
+    async vaultBackups() {
+      const now = Math.floor(Date.now() / 1000);
+      return [
+        { path: "/backups/vault-20261121-090000.sshv", modified: now - 3600, size: 4096 },
+        { path: "/backups/vault-20261120-180000.sshv", modified: now - 86400, size: 3900 },
+      ];
+    },
+    async vaultRestore(_backup, password) {
+      await wait();
+      if (!password) throw "마스터 비밀번호가 맞지 않거나 파일이 손상되었습니다.";
+      unlocked = true;
+    },
+    async appLog(level, message) {
+      console.info(`[appLog:${level}]`, message);
     },
     async sessionsList() {
       return sessions;

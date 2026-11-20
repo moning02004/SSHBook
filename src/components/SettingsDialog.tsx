@@ -238,10 +238,10 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
           </section>
 
           <section className="settings-section">
-            <h3>세션 기록</h3>
+            <h3>세션 기록·진단 로그</h3>
             <div className="row-gap" style={{ alignItems: "center" }}>
               <span className="hint" style={{ flex: 1 }}>
-                세션 편집 → 고급에서 '출력 기록 저장'을 켠 세션은 출력이 시각과 함께 파일로 남습니다.
+                세션 편집 → 고급에서 '출력 기록 저장'을 켠 세션의 출력과, 연결 실패 같은 오류 원인(sshbook-app.log)이 이 폴더에 남습니다. 비밀번호는 남기지 않습니다.
               </span>
               <button className="btn" onClick={onOpenLogs}>
                 기록 폴더 열기

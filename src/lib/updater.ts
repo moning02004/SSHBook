@@ -6,7 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useSyncExternalStore } from "react";
-import { errorText, inTauri } from "./api";
+import { api, errorText, inTauri } from "./api";
 
 export type UpdateState =
   | { phase: "idle" }
@@ -60,6 +60,7 @@ export async function checkForUpdate(manual: boolean): Promise<void> {
     if (!manual && dismissed === update.version) return set({ phase: "idle" });
     set({ phase: "available", version: update.version, notes: update.body ?? "" });
   } catch (e) {
+    void api.appLog("warn", `업데이트 확인 실패: ${errorText(e)}`).catch(() => {});
     set(manual ? { phase: "error", message: checkErrorText(e) } : { phase: "idle" });
   }
 }
@@ -94,6 +95,7 @@ export async function installUpdate(): Promise<void> {
     });
     await relaunch();
   } catch (e) {
+    void api.appLog("warn", `업데이트 설치 실패 v${version}: ${errorText(e)}`).catch(() => {});
     set({ phase: "error", message: `업데이트하지 못했습니다: ${errorText(e)}` });
   }
 }

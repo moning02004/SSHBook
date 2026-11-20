@@ -1,3 +1,4 @@
+mod applog;
 mod forward;
 mod fsperm;
 #[cfg(test)]
@@ -95,7 +96,10 @@ async fn vault_unlock(
     remember: Option<bool>,
 ) -> CmdResult<()> {
     let path = vault_path(&app)?;
-    let v = OpenVault::open(&path, &password).map_err(|e| e.to_string())?;
+    let v = OpenVault::open(&path, &password).map_err(|e| {
+        applog::warn(&format!("보관함을 열지 못함: {e}"));
+        e.to_string()
+    })?;
     // 예전 버전이 만든 보관함(0644)도 내 계정만 읽게 맞춘다.
     let _ = fsperm::fix_mode(&path);
     if remember == Some(true) {
@@ -504,16 +508,31 @@ async fn term_open(
     passphrase: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
-    let term = match plan_for(&app, &state, session_id, password, passphrase)? {
+    let plan = plan_for(&app, &state, session_id, password, passphrase)
+        .inspect_err(|e| applog::warn(&format!("연결 준비 실패: {e}")))?;
+    let term = match plan {
         Plan::Local { shell, cwd } => Term::Local(pty::spawn(app, id.clone(), shell, cwd, cols, rows)?),
         Plan::Ssh { connect, log } => {
+            let t = &connect.target;
+            let via = connect.jump.as_ref().map(|j| format!(" (점프 {}:{})", j.host, j.port));
+            let dest = format!("{}@{}:{}{}", t.user, t.host, t.port, via.unwrap_or_default());
             match ssh::connect(ssh::app_sink(app, id.clone(), log), *connect, cols, rows).await {
-                Ok(t) => Term::Ssh(t),
+                Ok(t) => {
+                    applog::info(&format!("연결됨 {dest}"));
+                    Term::Ssh(t)
+                }
                 Err(ssh::OpenError::HostKey(p)) => {
+                    applog::info(&format!("호스트 키 확인 필요 {} ({})", p.host_id, p.kind));
                     lock(&state.pending_hosts).insert(p.host_id.clone(), p.key.clone());
                     return Err(ssh::OpenError::HostKey(p).into_message());
                 }
-                Err(e) => return Err(e.into_message()),
+                // 비밀번호를 다시 묻는 것은 정상 흐름이라 남기지 않는다.
+                Err(e @ ssh::OpenError::Ask(_)) => return Err(e.into_message()),
+                Err(e) => {
+                    let msg = e.into_message();
+                    applog::warn(&format!("연결 실패 {dest}: {msg}"));
+                    return Err(msg);
+                }
             }
         }
     };
@@ -593,10 +612,43 @@ fn conn_of(state: &AppState, id: &str) -> CmdResult<Arc<ssh::Conn>> {
 
 /// 실패하면 SFTP 채널을 버려서 다음에 새로 열게 한다(채널이 끊겼을 수 있다).
 async fn sftp_call<T>(conn: &ssh::Conn, r: CmdResult<T>) -> CmdResult<T> {
-    if r.is_err() {
+    if let Err(e) = &r {
+        applog::warn(&format!("SFTP 오류: {e}"));
         sftp::reset(conn).await;
     }
     r
+}
+
+/// 화면 쪽에서 난 오류(업데이트 실패, 처리하지 못한 예외)를 진단 로그에 남긴다.
+#[tauri::command]
+fn app_log(level: String, message: String) {
+    let level = if level == "warn" || level == "error" {
+        "WARN"
+    } else {
+        "INFO"
+    };
+    applog::write(level, &format!("[화면] {message}"));
+}
+
+/// 보관함 백업 목록(새것부터)
+#[tauri::command]
+fn vault_backups(app: AppHandle) -> CmdResult<Vec<vault::backup::Backup>> {
+    Ok(vault::backup::list(&vault_path(&app)?))
+}
+
+/// 백업으로 되돌린다. 지금 보관함은 .sshv.bak으로 남는다. 그 백업 때의 마스터 비밀번호가 필요하다.
+#[tauri::command]
+async fn vault_restore(app: AppHandle, state: State<'_, AppState>, backup: String, password: String) -> CmdResult<()> {
+    let dest = vault_path(&app)?;
+    let src = PathBuf::from(&backup);
+    if !vault::backup::is_backup_of(&dest, &src) {
+        return Err("보관함 백업 폴더의 파일이 아닙니다.".into());
+    }
+    let v = vault::import(&src, &dest, &password).map_err(|e| e.to_string())?;
+    keychain::forget();
+    applog::info(&format!("보관함을 백업에서 되돌림: {backup}"));
+    *lock(&state.vault) = Some(v);
+    Ok(())
 }
 
 #[tauri::command]
@@ -718,9 +770,12 @@ const MENU_CLOSE_TAB: &str = "close-tab";
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .setup(|_app| {
+        .setup(|app| {
+            if let Ok(dir) = logs_dir(app.handle()) {
+                applog::init(dir);
+            }
             #[cfg(target_os = "macos")]
-            _app.set_menu(app_menu(_app.handle())?)?;
+            app.set_menu(app_menu(app.handle())?)?;
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -751,6 +806,9 @@ pub fn run() {
             snippet_save,
             snippet_delete,
             open_logs_dir,
+            app_log,
+            vault_backups,
+            vault_restore,
             sftp_list,
             sftp_cwd,
             sftp_download,

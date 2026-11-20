@@ -374,6 +374,8 @@ impl OpenVault {
         if let Some(dir) = self.path.parent() {
             crate::fsperm::private_dir(dir)?;
         }
+        // 덮어쓰기 전에 지금 파일을 백업해 둔다(한 시간에 최대 하나).
+        let _ = backup::take(&self.path, backup::MIN_GAP_SECS);
         let tmp = self.path.with_extension("sshv.tmp");
         crate::fsperm::write_private(&tmp, &bytes)?;
         fs::rename(&tmp, &self.path)?;
@@ -382,6 +384,8 @@ impl OpenVault {
 
     /// 새 salt로 키를 다시 만들고 저장한다. 내보낸 옛 파일은 옛 비밀번호로 계속 열린다.
     pub fn change_password(&mut self, new_password: &str) -> Result<()> {
+        // 비밀번호를 바꾸기 직전 상태는 시간과 상관없이 남긴다.
+        backup::take(&self.path, 0)?;
         let salt = random::<SALT_LEN>()?.to_vec();
         self.key = derive_key(new_password, &salt, self.params)?;
         self.salt = salt;
@@ -395,6 +399,99 @@ impl OpenVault {
             fs::copy(&self.path, dest)?;
         }
         Ok(())
+    }
+}
+
+/// 보관함 자동 백업. 보관함 옆 `backups/` 폴더에 `vault-<날짜-시각>.sshv`로 남긴다.
+/// 백업도 그때의 마스터 비밀번호로 잠겨 있다(복사본이므로).
+pub mod backup {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    /// 같은 시간대에 너무 많이 쌓이지 않게: 마지막 백업 뒤 이만큼 지나야 새로 만든다.
+    pub const MIN_GAP_SECS: u64 = 60 * 60;
+    /// 이보다 많으면 오래된 것부터 지운다.
+    pub const KEEP: usize = 10;
+
+    #[derive(serde::Serialize, Debug)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Backup {
+        pub path: String,
+        /// 유닉스 시각(초)
+        pub modified: u64,
+        pub size: u64,
+    }
+
+    pub fn dir_for(vault: &Path) -> PathBuf {
+        vault.parent().unwrap_or(Path::new(".")).join("backups")
+    }
+
+    /// 백업 목록, 새것부터
+    pub fn list(vault: &Path) -> Vec<Backup> {
+        let Ok(rd) = fs::read_dir(dir_for(vault)) else {
+            return vec![];
+        };
+        let mut v: Vec<Backup> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "sshv"))
+            .filter_map(|p| {
+                let m = fs::metadata(&p).ok()?;
+                let t = m
+                    .modified()
+                    .ok()?
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                Some(Backup {
+                    path: p.display().to_string(),
+                    modified: t,
+                    size: m.len(),
+                })
+            })
+            .collect();
+        v.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.path.cmp(&a.path)));
+        v
+    }
+
+    /// 보관함이 있고 마지막 백업이 min_gap보다 오래됐으면 지금 파일을 복사해 둔다.
+    pub fn take(vault: &Path, min_gap_secs: u64) -> std::io::Result<Option<PathBuf>> {
+        if !vault.exists() {
+            return Ok(None);
+        }
+        let newest = list(vault).into_iter().next();
+        if let Some(b) = &newest {
+            let age = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH + Duration::from_secs(b.modified))
+                .unwrap_or_default();
+            if age.as_secs() < min_gap_secs {
+                return Ok(None);
+            }
+        }
+        let dir = dir_for(vault);
+        crate::fsperm::private_dir(&dir)?;
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f");
+        let dest = dir.join(format!("vault-{stamp}.sshv"));
+        fs::copy(vault, &dest)?;
+        crate::fsperm::fix_mode(&dest)?;
+        // 복사본의 수정 시각을 지금으로 맞춘다(목록 정렬과 간격 계산에 쓴다).
+        if let Ok(f) = fs::File::options().write(true).open(&dest) {
+            let _ = f.set_modified(SystemTime::now());
+        }
+        for old in list(vault).into_iter().skip(KEEP) {
+            let _ = fs::remove_file(old.path);
+        }
+        Ok(Some(dest))
+    }
+
+    /// 복구할 파일이 정말 이 보관함의 백업 폴더 안에 있는지
+    pub fn is_backup_of(vault: &Path, candidate: &Path) -> bool {
+        let dir = dir_for(vault);
+        match (dir.canonicalize(), candidate.canonicalize()) {
+            (Ok(d), Ok(c)) => c.starts_with(d) && c.extension().is_some_and(|x| x == "sshv"),
+            _ => false,
+        }
     }
 }
 
@@ -478,6 +575,42 @@ mod tests {
         v.save().unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains(FORMAT));
         assert!(OpenVault::open(&path, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn saves_keep_hourly_backups_and_restore_works() {
+        let path = tmp_path("vault.sshv");
+        let mut v = OpenVault::create(&path, "correct horse", FAST).unwrap();
+        assert!(backup::list(&path).is_empty(), "처음 만들 때는 이전 파일이 없다");
+        v.data.sessions.push(sample_session("s1"));
+        v.save().unwrap();
+        assert_eq!(backup::list(&path).len(), 1);
+        v.data.sessions.push(sample_session("s2"));
+        v.save().unwrap();
+        assert_eq!(backup::list(&path).len(), 1, "한 시간 안에는 하나만");
+
+        // 비밀번호 변경 직전은 늘 남긴다.
+        v.change_password("battery staple").unwrap();
+        let list = backup::list(&path);
+        assert_eq!(list.len(), 2);
+
+        // 가장 최근 백업 = 변경 직전(세션 2개, 옛 비밀번호)
+        let newest = Path::new(&list[0].path);
+        assert!(backup::is_backup_of(&path, newest));
+        assert!(!backup::is_backup_of(&path, &path));
+        let restored = import(newest, &path, "correct horse").unwrap();
+        assert_eq!(restored.data.sessions.len(), 2);
+    }
+
+    #[test]
+    fn backups_are_pruned() {
+        let path = tmp_path("vault.sshv");
+        let v = OpenVault::create(&path, "correct horse", FAST).unwrap();
+        for _ in 0..(backup::KEEP + 3) {
+            backup::take(&path, 0).unwrap();
+        }
+        assert_eq!(backup::list(&path).len(), backup::KEEP);
+        drop(v);
     }
 
     #[test]
