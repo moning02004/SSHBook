@@ -1,4 +1,6 @@
 # main에 올리거나 PR을 열면 테스트와 빌드 검사를 돌린다.
+# - frontend / rust / integration / audit: PR과 main 모두
+# - desktop-build(Windows·macOS 실제 빌드): main에 합쳐질 때만 (PR마다는 오래 걸려서 돌리지 않는다)
 name: CI
 
 on:
@@ -42,3 +44,76 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # 실제 OpenSSH 서버(컨테이너)에 붙는 통합 테스트: SFTP, 포워딩, 점프 호스트, 시작 경로, 현재 폴더
+  integration:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - name: 테스트용 OpenSSH 서버
+        working-directory: .
+        run: |
+          docker build -t sshbook-it-sshd .github/sshd
+          docker run -d --name sshbook-it -p 127.0.0.1:2222:22 sshbook-it-sshd
+      - name: Tauri 빌드에 필요한 시스템 패키지
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: mkdir -p ../dist
+      - run: cargo test it_ -- --ignored
+        env:
+          SSHBOOK_IT_PORT: "2222"
+
+  # 알려진 취약점이 있는 의존성 검사
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm (배포되는 의존성, high 이상)
+        run: npm audit --omit=dev --audit-level=high
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit
+
+  # main에 합쳐질 때만 Windows·macOS에서 실제로 앱을 빌드해 본다(릴리스 전에 깨지는 것을 미리 잡는다).
+  desktop-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust_targets: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      # 업데이트 서명 없이 빌드만 확인한다(설치 파일은 올리지 않는다).
+      - run: npx tauri build ${{ matrix.args }} --no-bundle

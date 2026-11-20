@@ -1,4 +1,6 @@
 mod forward;
+#[cfg(test)]
+mod it_tests;
 mod keychain;
 mod pty;
 mod sftp;
