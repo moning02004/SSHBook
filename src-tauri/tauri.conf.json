@@ -39,6 +39,18 @@
       "minimumSystemVersion": "11.0"
     },
     "shortDescription": "SSH·로컬 터미널, 세션 보관함",
-    "publisher": "moning02004"
+    "publisher": "moning02004",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCOTY2QjUxMzRGNDQyNTUKUldSVlF2UTBVV3VXSzNjb280TEZWZjFJdGdkTEhSMjNhTS92dTRIV3Jkd25MWlR3aEtXNEFqY2MK",
+      "endpoints": [
+        "https://github.com/moning02004/SSHBook/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

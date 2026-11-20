@@ -23,6 +23,12 @@ Tauri 2 + React + xterm.js.
   xattr -dr com.apple.quarantine /Applications/SSHBook.app
   ```
 
+### 업데이트
+
+한 번 설치한 뒤에는 앱이 켜질 때 새 버전을 확인하고, 있으면 오른쪽 아래에 알려 준다.
+**지금 업데이트**를 누르면 내려받아 설치하고 다시 시작한다. 설정 → 업데이트에서 직접 확인할 수도 있다.
+받은 파일은 앱에 들어 있는 공개 키로 서명을 확인한 뒤에만 설치된다.
+
 ## 릴리스 만들기
 
 `src-tauri/tauri.conf.json`의 `version`을 올리고, 같은 버전 태그를 올리면
@@ -32,6 +38,16 @@ GitHub Actions(`.github/workflows/release.yml`)가 Windows·macOS 설치 파일�
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+앱 안 업데이트용 서명 키가 필요하다(처음 한 번).
+
+1. `npx tauri signer generate -w ~/.tauri/sshbook.key`로 키를 만든다. 암호를 정해 넣는다.
+2. 공개 키(`~/.tauri/sshbook.key.pub` 내용)를 `tauri.conf.json`의 `plugins.updater.pubkey`에 넣는다.
+3. GitHub 저장소 Settings → Secrets and variables → Actions에 등록한다.
+   - `TAURI_SIGNING_PRIVATE_KEY`: 개인 키 파일(`~/.tauri/sshbook.key`) 내용 전체
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: 키 암호
+
+개인 키를 잃어버리면 이미 설치된 앱에 더는 업데이트를 보낼 수 없다. 따로 백업해 둔다.
 
 ## 지금 되는 것
 
