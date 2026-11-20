@@ -1,8 +1,9 @@
 import type { MouseEvent, ReactNode } from "react";
 import type { LayoutNode } from "../lib/layout";
-import { pasteInto } from "../lib/terminals";
+import { pasteInto, paneStatus } from "../lib/terminals";
 import { IconMore } from "./Icons";
 import { TerminalView } from "./TerminalView";
+import { StatusDot } from "./StatusDot";
 
 export interface PaneInfo {
   sessionId: string | null;
@@ -50,7 +51,7 @@ export function Workspace({ tab, panes, onActivate, onMenu, onUnzoom, rightClick
         onContextMenu={openMenu}
       >
         <div className="pane-head">
-          <span className="dot" />
+          <StatusDot status={paneStatus(id)} />
           <span className="title">{info.title}</span>
           <span className="sub">{info.sub}</span>
           <span style={{ flex: 1 }} />

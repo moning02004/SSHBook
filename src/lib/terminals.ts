@@ -31,6 +31,9 @@ subscribeSettings((s) => {
   });
 });
 
+/** connecting: 접속 중(호스트 키·비밀번호 확인 포함) · live: 연결됨 · closed: 끊김 */
+export type PaneStatus = "connecting" | "live" | "closed";
+
 export interface PaneEntry {
   paneId: string;
   sessionId: string | null;
@@ -39,7 +42,9 @@ export interface PaneEntry {
   /** React가 바뀌어도 유지되는 DOM. TerminalView가 자기 자리에 붙였다 뗀다. */
   host: HTMLDivElement;
   backendId: Promise<string | null>;
-  exited: boolean;
+  status: PaneStatus;
+  /** 지금 연결에 묶인 입력·크기 리스너. 다시 연결할 때 걷어낸다. */
+  subs: { dispose(): void }[];
 }
 
 const entries = new Map<string, PaneEntry>();
@@ -47,15 +52,34 @@ const byBackend = new Map<string, PaneEntry>();
 let currentTheme: ThemeName = "light";
 let shortcutFilter: (e: KeyboardEvent) => boolean = () => false;
 
+// 상태가 바뀌면 React가 다시 그리도록 알린다(useSyncExternalStore).
+const statusListeners = new Set<() => void>();
+let statusVersion = 0;
+function setStatus(e: PaneEntry, s: PaneStatus) {
+  if (e.status === s) return;
+  e.status = s;
+  statusVersion++;
+  statusListeners.forEach((f) => f());
+}
+export function subscribeStatus(cb: () => void) {
+  statusListeners.add(cb);
+  return () => void statusListeners.delete(cb);
+}
+export const statusSnapshot = () => statusVersion;
+/** 아직 화면에 붙지 않은 창은 접속 중으로 본다. */
+export const paneStatus = (paneId: string): PaneStatus => entries.get(paneId)?.status ?? "connecting";
+
 const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 // termOpen 응답보다 먼저 도착한 출력(SSH 배너 등)은 잠깐 모아 두었다가 붙인다.
 const early = new Map<string, Uint8Array[]>();
 const earlyExit = new Map<string, number | null>();
 
+const RECONNECT_HINT = "Ctrl+R로 다시 연결";
+
 function showExit(e: PaneEntry, code: number | null) {
-  e.exited = true;
-  e.term.write(`\r\n\x1b[2m[연결 종료${code === null ? "" : ` · 코드 ${code}`}]\x1b[0m\r\n`);
+  setStatus(e, "closed");
+  e.term.write(`\r\n\x1b[2m[연결 종료${code === null ? "" : ` · 코드 ${code}`} · ${RECONNECT_HINT}]\x1b[0m\r\n`);
 }
 
 let wired = false;
@@ -124,8 +148,8 @@ function readLine(term: Terminal, prompt: string, hidden: boolean): Promise<stri
 }
 
 function fail(entry: PaneEntry, text: string): null {
-  entry.exited = true;
-  entry.term.write(`${RED}${text}${RESET}\r\n`);
+  setStatus(entry, "closed");
+  entry.term.write(`${RED}${text}${RESET} ${DIM}(${RECONNECT_HINT})${RESET}\r\n`);
   return null;
 }
 
@@ -201,22 +225,54 @@ export function getPane(paneId: string, sessionId: string | null): PaneEntry {
     term,
     fit,
     host,
-    exited: false,
+    status: "connecting",
+    subs: [],
     backendId: Promise.resolve(null),
   };
   entries.set(paneId, entry);
+  start(entry);
+  statusVersion++;
+  statusListeners.forEach((f) => f());
+  return entry;
+}
 
+function start(entry: PaneEntry) {
+  const { term } = entry;
+  entry.subs.forEach((d) => d.dispose());
+  entry.subs = [];
+  setStatus(entry, "connecting");
   entry.backendId = (async () => {
     await wireEvents();
     const id = await connect(entry);
     if (!id) return null;
+    // bind()에서 이미 끝난 것으로 표시됐을 수 있다.
+    if (entry.status === "connecting") setStatus(entry, "live");
     // 연결되는 동안 창 크기가 바뀌었을 수 있으니 한 번 맞춰 준다.
     void api.termResize(id, term.cols, term.rows);
-    term.onData((d) => void api.termWrite(id, d));
-    term.onResize(({ cols, rows }) => void api.termResize(id, cols, rows));
+    entry.subs.push(
+      term.onData((d) => void api.termWrite(id, d)),
+      term.onResize(({ cols, rows }) => void api.termResize(id, cols, rows)),
+    );
     return id;
   })();
-  return entry;
+}
+
+/** 끊긴 창을 같은 화면에서 다시 연결한다. 끊긴 창이 아니면 false. */
+export function reconnect(paneId: string): boolean {
+  const e = entries.get(paneId);
+  if (!e || e.status !== "closed") return false;
+  setStatus(e, "connecting");
+  void (async () => {
+    const old = await e.backendId;
+    if (old) {
+      byBackend.delete(old);
+      await api.termClose(old).catch(() => {});
+    }
+    if (!entries.has(paneId)) return;
+    e.term.write(`\r\n${DIM}다시 연결합니다…${RESET}\r\n`);
+    start(e);
+  })();
+  return true;
 }
 
 /** 창을 완전히 닫을 때만 부른다(탭 이동·확대에는 부르지 않는다). */
@@ -224,6 +280,7 @@ export async function disposePane(paneId: string) {
   const e = entries.get(paneId);
   if (!e) return;
   entries.delete(paneId);
+  e.subs.forEach((d) => d.dispose());
   const id = await e.backendId;
   if (id) {
     byBackend.delete(id);
@@ -265,5 +322,5 @@ export function focusPane(paneId: string) {
 /** 연결이 살아 있는 창인지(닫기 전에 확인할 대상) */
 export function isLive(paneId: string): boolean {
   const e = entries.get(paneId);
-  return !!e && !e.exited;
+  return !!e && e.status !== "closed";
 }

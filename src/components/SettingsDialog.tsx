@@ -30,6 +30,8 @@ const MOD = isMac ? "⌘" : "Ctrl+";
 const K = isMac ? "⌘⇧" : "Ctrl+Shift+";
 
 const SHORTCUTS: [string, string][] = [
+  ["호스트 목록", isMac ? "⌘D" : "Alt+D"],
+  ["끊긴 창 다시 연결", "Ctrl+R"],
   ["설정 열기", `${MOD},`],
   ["글자 크게 / 작게 / 원래대로", `${MOD}= / ${MOD}- / ${MOD}0`],
   ["사이드바 접기·펼치기", `${K}B`],
