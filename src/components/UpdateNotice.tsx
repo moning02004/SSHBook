@@ -17,6 +17,7 @@ export function UpdateNotice({ liveCount }: Props) {
       {st.phase === "available" && (
         <>
           <div className="update-title">새 버전 v{st.version}이 나왔습니다</div>
+          {st.notes && <pre className="update-notes">{st.notes.split("## 내려받기")[0].trim()}</pre>}
           <p className="hint">
             {liveCount > 0
               ? `업데이트하면 앱이 다시 시작되고, 연결된 창 ${liveCount}개가 끊깁니다.`

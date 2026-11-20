@@ -479,3 +479,5 @@ body.dragging-tab .term-slot { pointer-events: none; }
 .sftp-transfer .row { display: flex; align-items: center; gap: 8px; }
 .sftp-transfer .label { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sftp-transfer .detail { color: var(--muted); font-family: var(--mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.update-notes { margin: 0; max-height: 120px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--soft); font: 11px/1.5 var(--font); white-space: pre-wrap; color: var(--muted); }
