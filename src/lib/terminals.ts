@@ -3,6 +3,7 @@
 // 화면 내용과 연결이 끊기지 않게 하려는 것이다.
 
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
 import { api, parseOpenError, type OpenOptions } from "./api";
 import { fontStack, getSettings, subscribeSettings, type Settings } from "./settings";
@@ -45,6 +46,11 @@ export interface PaneEntry {
   status: PaneStatus;
   /** 지금 연결에 묶인 입력·크기 리스너. 다시 연결할 때 걷어낸다. */
   subs: { dispose(): void }[];
+  /** 연결돼 있는 동안의 백엔드 터미널 id (동시 입력·파일 창에서 바로 쓴다) */
+  liveId: string | null;
+  search: SearchAddon;
+  /** 서버 응답 시간(ms). SSH만, 모르면 null */
+  latency: number | null;
 }
 
 const entries = new Map<string, PaneEntry>();
@@ -55,11 +61,18 @@ let shortcutFilter: (e: KeyboardEvent) => boolean = () => false;
 // 상태가 바뀌면 React가 다시 그리도록 알린다(useSyncExternalStore).
 const statusListeners = new Set<() => void>();
 let statusVersion = 0;
+function notify() {
+  statusVersion++;
+  statusListeners.forEach((f) => f());
+}
 function setStatus(e: PaneEntry, s: PaneStatus) {
   if (e.status === s) return;
   e.status = s;
-  statusVersion++;
-  statusListeners.forEach((f) => f());
+  if (s !== "live") {
+    e.liveId = null;
+    e.latency = null;
+  }
+  notify();
 }
 export function subscribeStatus(cb: () => void) {
   statusListeners.add(cb);
@@ -68,6 +81,25 @@ export function subscribeStatus(cb: () => void) {
 export const statusSnapshot = () => statusVersion;
 /** 아직 화면에 붙지 않은 창은 접속 중으로 본다. */
 export const paneStatus = (paneId: string): PaneStatus => entries.get(paneId)?.status ?? "connecting";
+export const paneLatency = (paneId: string): number | null => entries.get(paneId)?.latency ?? null;
+/** 연결돼 있으면 백엔드 터미널 id (SFTP가 같은 연결을 쓴다) */
+export const backendIdOf = (paneId: string): string | null => entries.get(paneId)?.liveId ?? null;
+
+// ---- 분할 창 동시 입력 ----
+// 같은 묶음 안의 창에서 친 글자를 묶음의 연결된 창 모두에 보낸다.
+const broadcastOf = new Map<string, string[]>();
+
+/** 탭마다 동시 입력이 켜진 창 묶음. 부를 때마다 통째로 바꾼다. */
+export function setBroadcastGroups(groups: string[][]) {
+  broadcastOf.clear();
+  for (const g of groups) for (const id of g) broadcastOf.set(id, g);
+}
+
+function sendInput(from: PaneEntry, data: string) {
+  const group = broadcastOf.get(from.paneId);
+  const targets = group ? group.map((id) => entries.get(id)) : [from];
+  for (const e of targets) if (e?.liveId) void api.termWrite(e.liveId, data);
+}
 
 const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
@@ -97,6 +129,13 @@ async function wireEvents() {
     const e = byBackend.get(id);
     if (e) showExit(e, code);
     else earlyExit.set(id, code);
+  });
+  await api.onTermLatency(({ id, ms }) => {
+    const e = byBackend.get(id);
+    if (e && e.status === "live" && e.latency !== ms) {
+      e.latency = ms;
+      notify();
+    }
   });
 }
 
@@ -208,11 +247,14 @@ export function getPane(paneId: string, sessionId: string | null): PaneEntry {
   host.className = "term-host";
   const term = new Terminal({
     ...termOptions(getSettings()),
-    allowProposedApi: false,
+    // 검색 결과 강조(decoration)에 필요하다.
+    allowProposedApi: true,
     theme: terminalThemes[currentTheme],
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  const search = new SearchAddon({ highlightLimit: 2000 });
+  term.loadAddon(search);
   term.attachCustomKeyEventHandler((e) => !shortcutFilter(e));
   term.onSelectionChange(() => {
     const text = term.getSelection();
@@ -227,12 +269,14 @@ export function getPane(paneId: string, sessionId: string | null): PaneEntry {
     host,
     status: "connecting",
     subs: [],
+    liveId: null,
+    search,
+    latency: null,
     backendId: Promise.resolve(null),
   };
   entries.set(paneId, entry);
   start(entry);
-  statusVersion++;
-  statusListeners.forEach((f) => f());
+  notify();
   return entry;
 }
 
@@ -246,11 +290,14 @@ function start(entry: PaneEntry) {
     const id = await connect(entry);
     if (!id) return null;
     // bind()에서 이미 끝난 것으로 표시됐을 수 있다.
-    if (entry.status === "connecting") setStatus(entry, "live");
+    if (entry.status === "connecting") {
+      entry.liveId = id;
+      setStatus(entry, "live");
+    }
     // 연결되는 동안 창 크기가 바뀌었을 수 있으니 한 번 맞춰 준다.
     void api.termResize(id, term.cols, term.rows);
     entry.subs.push(
-      term.onData((d) => void api.termWrite(id, d)),
+      term.onData((d) => sendInput(entry, d)),
       term.onResize(({ cols, rows }) => void api.termResize(id, cols, rows)),
     );
     return id;
@@ -323,4 +370,72 @@ export function focusPane(paneId: string) {
 export function isLive(paneId: string): boolean {
   const e = entries.get(paneId);
   return !!e && e.status !== "closed";
+}
+
+// ---- 터미널 안 검색 ----
+
+const SEARCH_COLORS: ISearchOptions["decorations"] = {
+  matchBackground: "#f5d97a66",
+  matchBorder: "#d9a90088",
+  matchOverviewRuler: "#d9a900",
+  activeMatchBackground: "#ff9f1a",
+  activeMatchBorder: "#ff7a00",
+  activeMatchColorOverviewRuler: "#ff7a00",
+};
+
+export interface SearchQuery {
+  text: string;
+  caseSensitive: boolean;
+  regex: boolean;
+}
+
+const searchOpts = (q: SearchQuery, incremental = false): ISearchOptions => ({
+  caseSensitive: q.caseSensitive,
+  regex: q.regex,
+  incremental,
+  decorations: SEARCH_COLORS,
+});
+
+/** 찾으면 true. incremental이면 지금 위치에서 다시 찾는다(글자를 칠 때). */
+export function findNext(paneId: string, q: SearchQuery, incremental = false): boolean {
+  const e = entries.get(paneId);
+  if (!e || !q.text) return false;
+  try {
+    return e.search.findNext(q.text, searchOpts(q, incremental));
+  } catch {
+    return false; // 정규식이 틀렸을 때
+  }
+}
+
+export function findPrevious(paneId: string, q: SearchQuery): boolean {
+  const e = entries.get(paneId);
+  if (!e || !q.text) return false;
+  try {
+    return e.search.findPrevious(q.text, searchOpts(q));
+  } catch {
+    return false;
+  }
+}
+
+export function clearSearch(paneId: string) {
+  const e = entries.get(paneId);
+  e?.search.clearDecorations();
+  e?.term.clearSelection();
+}
+
+/** 결과 개수가 바뀔 때. index는 0부터, 너무 많으면 -1 */
+export function onSearchResults(paneId: string, cb: (index: number, count: number) => void): () => void {
+  const sub = entries.get(paneId)?.search.onDidChangeResults(({ resultIndex, resultCount }) => cb(resultIndex, resultCount));
+  return () => sub?.dispose();
+}
+
+// ---- 명령 모음 붙여넣기 ----
+
+/** 지금 창에 명령을 넣는다. run이면 Enter까지 보낸다. 동시 입력이 켜져 있으면 묶음 전체에 간다. */
+export function insertCommand(paneId: string, command: string, run: boolean) {
+  const e = entries.get(paneId);
+  if (!e) return;
+  e.term.paste(command);
+  if (run) e.term.input("\r", true);
+  e.term.focus();
 }

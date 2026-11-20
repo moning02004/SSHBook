@@ -3,6 +3,34 @@
 
 export type AuthMethod = "password" | "key" | "agent";
 
+/** 서버 환경 색. 운영 서버를 빨강으로 두면 탭과 창 테두리에 보인다. */
+export const SESSION_COLORS = ["red", "orange", "yellow", "green", "blue", "purple"] as const;
+export type SessionColor = (typeof SESSION_COLORS)[number];
+export const COLOR_LABEL: Record<SessionColor, string> = {
+  red: "빨강 (운영)",
+  orange: "주황 (스테이징)",
+  yellow: "노랑",
+  green: "초록 (개발)",
+  blue: "파랑",
+  purple: "보라",
+};
+
+export type ForwardKind = "local" | "remote" | "dynamic";
+
+/** 포트 포워딩 하나. dynamic(SOCKS)은 host/port를 쓰지 않는다. */
+export interface Forward {
+  kind: ForwardKind;
+  bindPort: number;
+  host?: string;
+  port?: number;
+}
+
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -11,6 +39,7 @@ export interface Session {
   kind: "local" | "ssh";
   // 로컬 셸
   shell?: string;
+  /** 로컬 셸: 시작 폴더. SSH: 연결하자마자 이동할 경로(비우면 홈 폴더) */
   cwd?: string;
   // SSH
   host?: string;
@@ -19,6 +48,12 @@ export interface Session {
   auth?: AuthMethod;
   /** 키를 가져올 때 읽은 원본 경로(표시용). 실제 키 내용은 보관함 안에만 있다. */
   keyPath?: string;
+  color?: SessionColor | null;
+  /** 거쳐 갈 서버(다른 SSH 세션의 id) */
+  jumpId?: string | null;
+  forwards?: Forward[];
+  /** 터미널 출력을 시각과 함께 파일로 남긴다 */
+  logOutput?: boolean;
   // 보관함에 비밀 정보가 있는지 여부만 받는다. 내용은 프론트엔드로 넘어오지 않는다.
   hasPassword?: boolean;
   hasPrivateKey?: boolean;
@@ -58,6 +93,21 @@ export function groupSessions(list: Session[]): SessionSection[] {
   const ungrouped = list.filter((s) => groupOf(s) === null).sort(byName);
   if (ungrouped.length) sections.push({ title: UNGROUPED_LABEL, sessions: ungrouped });
   return sections;
+}
+
+export function describeForward(f: Forward): string {
+  const dest = `${f.host || "?"}:${f.port || "?"}`;
+  if (f.kind === "local") return `내 PC :${f.bindPort} → ${dest}`;
+  if (f.kind === "remote") return `서버 :${f.bindPort} → 내 PC ${dest}`;
+  return `SOCKS5 :${f.bindPort}`;
+}
+
+/** 저장하기 전에 확인한다. 문제가 있으면 사용자에게 보여 줄 문장을 돌려준다. */
+export function forwardProblem(f: Forward): string | null {
+  const okPort = (p: number | undefined) => !!p && p >= 1 && p <= 65535;
+  if (!okPort(f.bindPort)) return "포워딩 포트는 1~65535 사이여야 합니다.";
+  if (f.kind !== "dynamic" && (!f.host?.trim() || !okPort(f.port))) return "포워딩 목적지의 호스트와 포트를 입력하세요.";
+  return null;
 }
 
 export function filterSessions(list: Session[], query: string): Session[] {

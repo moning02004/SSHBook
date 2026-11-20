@@ -10,6 +10,7 @@ import {
   SCROLLBACKS,
   subscribeSettings,
   updateSettings,
+  AUTO_LOCK_CHOICES,
   type CursorStyle,
 } from "../lib/settings";
 import type { ThemeName } from "../lib/theme";
@@ -23,6 +24,11 @@ export function useSettings() {
 interface Props {
   theme: ThemeName;
   onTheme: (t: ThemeName) => void;
+  /** 이 PC의 키체인에 보관함 키를 기억해 두었는지 */
+  remembered: boolean;
+  onRemember: (on: boolean) => void;
+  /** 세션 기록 폴더 열기 */
+  onOpenLogs: () => void;
   onClose: () => void;
 }
 
@@ -41,6 +47,12 @@ const SHORTCUTS: [string, string][] = [
   ["이 창만 크게 보기", `${K}Z`],
   ["복사 / 붙여넣기", `${K}C / ${K}V`],
   ["화면 지우기", `${K}K`],
+  ["터미널에서 찾기", isMac ? "⌘F" : `${K}F`],
+  ["명령 모음", `${K}S`],
+  ["파일 창 (SFTP)", `${K}O`],
+  ["분할 창 동시 입력", `${K}I`],
+  ["탭 옮기기 / 분할", "탭을 다른 칸이나 가장자리로 끌기"],
+  ["탭 닫기 (가운데 버튼)", "휠 클릭"],
   ...(isMac ? ([["탭 닫기 (탭이 없으면 창 닫기)", "⌘W"]] as [string, string][]) : []),
   ["창 닫기", `${K}W`],
 ];
@@ -48,7 +60,7 @@ const SHORTCUTS: [string, string][] = [
 const CUSTOM = "__custom__";
 
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
-export function SettingsDialog({ theme, onTheme, onClose }: Props) {
+export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenLogs, onClose }: Props) {
   const s = useSettings();
   const installed = useMemo(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])), []);
   const isPreset = s.fontFamily === "" || FONT_PRESETS.includes(s.fontFamily);
@@ -185,6 +197,43 @@ export function SettingsDialog({ theme, onTheme, onClose }: Props) {
                 {!SCROLLBACKS.includes(s.scrollback) && <option value={s.scrollback}>{s.scrollback.toLocaleString("ko-KR")}줄</option>}
               </select>
             </label>
+          </section>
+
+          <section className="settings-section">
+            <h3>보안</h3>
+            <label className="field">
+              <span>자동 잠금</span>
+              <select className="input" value={s.autoLockMinutes} onChange={(e) => updateSettings({ autoLockMinutes: Number(e.target.value) })}>
+                {AUTO_LOCK_CHOICES.map((m) => (
+                  <option key={m} value={m}>
+                    {m === 0 ? "잠그지 않음" : `${m}분 동안 입력이 없으면 잠금`}
+                  </option>
+                ))}
+              </select>
+              <span className="hint">잠그면 열린 연결도 모두 끊깁니다.</span>
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={remembered} onChange={(e) => onRemember(e.target.checked)} />
+              <span>
+                이 PC에서 기억하기
+                <br />
+                <span className="hint">
+                  {isMac ? "macOS 키체인" : "Windows 자격 증명 관리자"}에 보관함 키를 두고, 앱을 켤 때 마스터 비밀번호 없이 엽니다.
+                </span>
+              </span>
+            </label>
+          </section>
+
+          <section className="settings-section">
+            <h3>세션 기록</h3>
+            <div className="row-gap" style={{ alignItems: "center" }}>
+              <span className="hint" style={{ flex: 1 }}>
+                세션 편집 → 고급에서 '출력 기록 저장'을 켠 세션은 출력이 시각과 함께 파일로 남습니다.
+              </span>
+              <button className="btn" onClick={onOpenLogs}>
+                기록 폴더 열기
+              </button>
+            </div>
           </section>
 
           <section className="settings-section">

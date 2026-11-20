@@ -17,7 +17,11 @@ export interface Settings {
   rightClickPaste: boolean;
   /** 연결된 창을 닫을 때 묻기 */
   confirmClose: boolean;
+  /** 아무 입력이 없으면 보관함을 잠그는 시간(분). 0이면 잠그지 않는다 */
+  autoLockMinutes: number;
 }
+
+export const AUTO_LOCK_CHOICES = [0, 5, 10, 15, 30, 60];
 
 export const FONT_SIZE = { min: 9, max: 32, step: 1 };
 export const LINE_HEIGHTS = [1, 1.1, 1.2, 1.4];
@@ -48,6 +52,7 @@ export const DEFAULT_SETTINGS: Settings = {
   copyOnSelect: false,
   rightClickPaste: false,
   confirmClose: true,
+  autoLockMinutes: 0,
 };
 
 /** 한글은 고른 글꼴에 없을 수 있으므로 한글 글꼴을 뒤에 붙인다. */
@@ -77,6 +82,7 @@ export function normalize(raw: unknown): Settings {
     copyOnSelect: bool(r.copyOnSelect, d.copyOnSelect),
     rightClickPaste: bool(r.rightClickPaste, d.rightClickPaste),
     confirmClose: bool(r.confirmClose, d.confirmClose),
+    autoLockMinutes: AUTO_LOCK_CHOICES.includes(num(r.autoLockMinutes, -1)) ? num(r.autoLockMinutes, 0) : d.autoLockMinutes,
   };
 }
 

@@ -19,3 +19,19 @@ export async function pickExportPath(): Promise<string | null> {
   if (!inTauri) return window.prompt("내보낼 경로", "vault.sshv");
   return save({ title: "보관함 파일 내보내기", defaultPath: "vault.sshv", filters: VAULT_FILTER });
 }
+
+/** 내려받을 파일을 저장할 곳 */
+export async function pickSavePath(defaultName: string): Promise<string | null> {
+  if (!inTauri) return window.prompt("저장할 경로", `~/Downloads/${defaultName}`);
+  return save({ title: "내려받기", defaultPath: defaultName });
+}
+
+/** 올릴 파일들 */
+export async function pickUploadFiles(): Promise<string[]> {
+  if (!inTauri) {
+    const p = window.prompt("올릴 파일 경로", "~/notes.txt");
+    return p ? [p] : [];
+  }
+  const r = await open({ title: "올릴 파일 선택", multiple: true, directory: false });
+  return Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
+}

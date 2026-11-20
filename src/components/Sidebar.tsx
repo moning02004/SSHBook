@@ -40,7 +40,7 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
               </div>
             )}
             {sec.sessions.map((s) => (
-              <div key={s.id} className={`session-row${s.id === selectedId ? " selected" : ""}`}>
+              <div key={s.id} className={`session-row${s.id === selectedId ? " selected" : ""}${s.color ? ` env-row env-${s.color}` : ""}`}>
                 <button className="session" onClick={() => onOpen(s)} title={`${s.name} 연결`}>
                   <span className={`dot${connected.has(s.id) ? " on" : ""}`} />
                   <span className="meta">

@@ -1,24 +1,26 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from "react";
 import { ConfirmClose } from "./components/ConfirmClose";
 import { SettingsDialog, useSettings } from "./components/SettingsDialog";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
-import { IconClose, IconExpand, IconMoon, IconPlus, IconPrompt, IconSettings, IconShrink, IconSidebar, IconSplit, IconSun } from "./components/Icons";
+import { IconExpand, IconMoon, IconPrompt, IconSettings, IconShrink, IconSidebar, IconSun } from "./components/Icons";
 import { HostPicker } from "./components/HostPicker";
 import { SessionEditor } from "./components/SessionEditor";
-import { StatusDot } from "./components/StatusDot";
+import { SnippetsDialog } from "./components/SnippetsDialog";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { checkForUpdate } from "./lib/updater";
 import { Sidebar } from "./components/Sidebar";
 import { VaultScreen } from "./components/VaultScreen";
-import { Workspace, type PaneInfo, type Tab } from "./components/Workspace";
+import { Workspace, type PaneInfo } from "./components/Workspace";
 import { api, errorText, inTauri, type SecretInput, type VaultStatus } from "./lib/api";
 import { loadFlag, saveFlag, SIDEBAR_HIDDEN } from "./lib/prefs";
 import { bumpFontSize, DEFAULT_SETTINGS, updateSettings } from "./lib/settings";
 import { pickExportPath } from "./lib/dialogs";
-import { closePane, isSplit, pane, paneIds, splitPane, splitQuad, unsplit, type SplitDir } from "./lib/layout";
-import { describeSession, type Session } from "./lib/sessions";
+import { sideAt, type DropSide, type SplitDir } from "./lib/layout";
+import * as desks from "./lib/groups";
+import { emptyDesk, type Desk, type TabDrop } from "./lib/groups";
+import { describeSession, type Session, type Snippet } from "./lib/sessions";
 import * as terms from "./lib/terminals";
 import { applyTheme, loadTheme, type ThemeName } from "./lib/theme";
 
@@ -33,6 +35,8 @@ function shortcutOf(e: KeyboardEvent): string | null {
   // 호스트 목록: 맥은 ⌘D, 그 밖은 Alt+D. 셸의 Ctrl+D(EOF)와 겹치지 않게 한다.
   // 한글 입력 상태에서도 동작하도록 물리 키로 본다.
   if (e.code === "KeyD" && !e.shiftKey && !e.ctrlKey && (isMac ? e.metaKey && !e.altKey : e.altKey && !e.metaKey)) return "hosts";
+  // 찾기: 맥은 ⌘F. 그 밖은 Ctrl+F가 셸 단축키(앞으로 한 글자)라서 Ctrl+Shift+F만 쓴다.
+  if (isMac && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.code === "KeyF") return "search";
   if (e.altKey && e.shiftKey && e.key === "ArrowRight") return "split-row";
   if (e.altKey && e.shiftKey && e.key === "ArrowDown") return "split-column";
   const mod = isMac ? e.metaKey : e.ctrlKey;
@@ -53,6 +57,10 @@ function shortcutOf(e: KeyboardEvent): string | null {
     case "V": return "paste";
     case "K": return "clear";
     case "B": return "sidebar";
+    case "F": return "search";
+    case "I": return "broadcast";
+    case "S": return "snippets";
+    case "O": return "sftp";
   }
   return null;
 }
@@ -70,14 +78,31 @@ function reconnectShortcutOf(e: KeyboardEvent, activeLive: boolean): string | nu
 }
 const K = isMac ? "⌘⇧" : "Ctrl+Shift+";
 
+/** 끌고 있는 탭과 놓을 자리 */
+type DropTarget = (TabDrop & { center?: boolean }) | null;
+interface DragState {
+  paneId: string;
+  label: string;
+  x: number;
+  y: number;
+  /** 잡은 지점이 탭 안에서 어디였는지. 끄는 동안 그 지점이 커서 아래에 머문다. */
+  grab: { dx: number; dy: number; width: number };
+  target: DropTarget;
+}
+const SIDE_LABEL: Record<DropSide, string> = { left: "왼쪽에 분할", right: "오른쪽에 분할", top: "위에 분할", bottom: "아래에 분할" };
+/** 이만큼 움직여야 끌기로 본다(그 전에는 그냥 클릭) */
+const DRAG_START_PX = 5;
+
 export function App() {
   const [theme, setTheme] = useState<ThemeName>(loadTheme);
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  // 분할된 칸들과 칸마다의 탭(파이참 에디터 분할처럼)
+  const [desk, setDesk] = useState<Desk>(emptyDesk);
   const [panes, setPanes] = useState<Record<string, PaneInfo>>({});
-  const [menu, setMenu] = useState<{ paneId: string; x: number; y: number } | null>(null);
+  /** tab: 탭을 오른쪽 클릭, pane: 터미널을 오른쪽 클릭 */
+  const [menu, setMenu] = useState<{ x: number; y: number; paneId: string; kind: "tab" | "pane" } | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
   const [editing, setEditing] = useState<{ session: Session | null } | null>(null);
   const [notice, setNotice] = useState("");
   const [sidebarHidden, setSidebarHidden] = useState(() => loadFlag(SIDEBAR_HIDDEN, false));
@@ -87,6 +112,11 @@ export function App() {
   const [confirm, setConfirm] = useState<{ names: string[]; run: () => void } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [picker, setPicker] = useState(false);
+  const [searchPane, setSearchPane] = useState<string | null>(null);
+  const [sftpPanes, setSftpPanes] = useState<Set<string>>(() => new Set());
+  const [snippets, setSnippets] = useState<Snippet[] | null>(null);
+  // 앱을 막 켰을 때만 키체인으로 자동으로 연다. 한 번 잠그면 그다음엔 직접 연다.
+  const firstLaunch = useRef(true);
   // 창의 연결 상태가 바뀌면 다시 그린다(탭·사이드바의 상태 점).
   useSyncExternalStore(terms.subscribeStatus, terms.statusSnapshot);
 
@@ -129,65 +159,116 @@ export function App() {
   }, []);
   useEffect(() => void refresh(), [refresh]);
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
-  const tabOf = (paneId: string) => tabs.find((t) => paneIds(t.root).includes(paneId)) ?? null;
-  const updateTab = (tabId: string, fn: (t: Tab) => Tab) => setTabs((all) => all.map((t) => (t.id === tabId ? fn(t) : t)));
+  /** 지금 입력이 가는 터미널 */
+  const activeId = desks.activePane(desk);
+  const groupCount = desks.groupOrder(desk).length;
 
   const infoFor = (sessionId: string | null, list: Session[] = sessions): PaneInfo => {
     const s = list.find((x) => x.id === sessionId);
-    return s ? { sessionId: s.id, title: s.name, sub: describeSession(s) } : { sessionId: null, title: "로컬 셸", sub: "기본 셸" };
+    return s
+      ? { sessionId: s.id, title: s.name, sub: describeSession(s), color: s.color ?? null, ssh: s.kind === "ssh" }
+      : { sessionId: null, title: "로컬 셸", sub: "기본 셸" };
   };
 
-  // ---- 탭과 창 조작 ----
+  // 세션을 고치면(이름·색 등) 열린 창의 머리글도 바로 바꾼다.
+  useEffect(() => {
+    setPanes((all) => {
+      let changed = false;
+      const next = Object.fromEntries(
+        Object.entries(all).map(([id, p]) => {
+          if (!p.sessionId) return [id, p];
+          const s = sessions.find((x) => x.id === p.sessionId);
+          if (!s) return [id, p];
+          const info = { ...p, title: s.name, sub: describeSession(s), color: s.color ?? null };
+          if (info.title !== p.title || info.sub !== p.sub || info.color !== p.color) changed = true;
+          return [id, info];
+        }),
+      );
+      return changed ? next : all;
+    });
+  }, [sessions]);
 
-  const openTab = (sessionId: string | null, list?: Session[]) => {
+  // 동시 입력: 켜져 있으면 보이는 칸들의 탭에 같은 입력을 보낸다.
+  const visibleKey = desks.visibleTabs(desk).join(",");
+  useEffect(() => {
+    const visible = desks.visibleTabs(desk);
+    terms.setBroadcastGroups(desk.broadcast && visible.length > 1 ? [visible] : []);
+  }, [desk.broadcast, visibleKey]);
+
+  const toggleBroadcast = () => {
+    if (desks.visibleTabs(desk).length < 2) return setNotice("동시 입력은 칸을 둘 이상으로 나눴을 때 씁니다.");
+    setDesk((d) => ({ ...d, broadcast: !d.broadcast }));
+  };
+  const toggleSftp = (paneId: string) =>
+    setSftpPanes((all) => {
+      const next = new Set(all);
+      if (next.has(paneId)) next.delete(paneId);
+      else next.add(paneId);
+      return next;
+    });
+
+  const openSnippets = async () => {
+    try {
+      setSnippets(await api.snippetsList());
+    } catch (e) {
+      setNotice(`명령 모음을 열지 못했습니다: ${errorText(e)}`);
+    }
+  };
+  const closeSnippets = () => {
+    setSnippets(null);
+    if (activeId) requestAnimationFrame(() => terms.focusPane(activeId));
+  };
+
+  // ---- 칸과 탭 조작 ----
+
+  /** 새 탭(새 연결)을 연다. groupId를 주면 그 칸에, 아니면 지금 칸에. */
+  const openTab = (sessionId: string | null, list?: Session[], groupId?: string | null) => {
     const paneId = newId();
-    const tab: Tab = { id: newId(), root: pane(paneId), activePane: paneId, zoomed: null };
     setPanes((p) => ({ ...p, [paneId]: infoFor(sessionId, list) }));
-    setTabs((all) => [...all, tab]);
-    setActiveTabId(tab.id);
+    setDesk((d) => desks.addTab(d, paneId, newId(), groupId));
   };
 
-  /** 새 창은 같은 세션으로 새로 연결한다(같은 서버에 창 하나 더). */
+  /** 같은 세션으로 새로 연결하는 탭 id를 만든다(같은 서버에 하나 더). */
   const clonePanes = (fromPaneId: string, count: number) => {
     const ids = Array.from({ length: count }, newId);
     setPanes((p) => ({ ...p, ...Object.fromEntries(ids.map((id) => [id, p[fromPaneId]])) }));
     return ids;
   };
 
+  const fullNotice = () => setNotice(`칸은 ${MAX_PANES}개까지 나눌 수 있습니다.`);
+
+  /** 이 탭의 칸 옆에 새 칸을 만들고 같은 세션으로 새로 연결한다. */
   const doSplit = (paneId: string, dir: SplitDir) => {
-    const tab = tabOf(paneId);
-    if (!tab || paneIds(tab.root).length >= MAX_PANES) return;
+    const g = desks.groupOf(desk, paneId);
+    if (!g) return;
+    if (groupCount >= MAX_PANES) return fullNotice();
     const [id] = clonePanes(paneId, 1);
-    updateTab(tab.id, (t) => ({ ...t, root: splitPane(t.root, paneId, dir, id), activePane: id, zoomed: null }));
+    setDesk((d) => desks.splitWith(d, g.id, dir === "row" ? "right" : "bottom", id, newId()));
+  };
+
+  /** 이 탭을 새 칸으로 옮겨서 분할한다(새로 연결하지 않는다). */
+  const moveToSplit = (paneId: string, side: DropSide) => {
+    const g = desks.groupOf(desk, paneId);
+    if (!g) return;
+    if (groupCount >= MAX_PANES) return fullNotice();
+    setDesk((d) => desks.moveTab(d, paneId, { kind: "edge", groupId: g.id, side }, newId()));
   };
 
   const doQuad = (paneId: string) => {
-    const tab = tabOf(paneId);
-    if (!tab || isSplit(tab.root)) return;
+    const g = desks.groupOf(desk, paneId);
+    if (!g) return;
+    if (groupCount + 3 > MAX_PANES) return fullNotice();
     const ids = clonePanes(paneId, 3) as [string, string, string];
-    updateTab(tab.id, (t) => ({ ...t, root: splitQuad(t.root, paneId, ids), zoomed: null }));
+    setDesk((d) => desks.quad(d, g.id, ids, [newId(), newId(), newId()]));
   };
 
   const doZoom = (paneId: string) => {
-    const tab = tabOf(paneId);
-    if (!tab || !isSplit(tab.root)) return;
-    updateTab(tab.id, (t) => ({ ...t, zoomed: t.zoomed ? null : paneId, activePane: paneId }));
+    const g = desks.groupOf(desk, paneId);
+    if (g) setDesk((d) => desks.toggleZoom(d, g.id));
   };
 
-  /** 분할 해제: 이 창만 남기고, 나머지 창은 연결을 유지한 채 새 탭으로 옮긴다. */
-  const doUnsplit = (paneId: string) => {
-    const tab = tabOf(paneId);
-    if (!tab) return;
-    const { root, detached } = unsplit(tab.root, paneId);
-    const moved: Tab[] = detached.map((id) => ({ id: newId(), root: pane(id), activePane: id, zoomed: null }));
-    setTabs((all) => {
-      const i = all.findIndex((t) => t.id === tab.id);
-      const next = [...all];
-      next.splice(i, 1, { ...tab, root, activePane: paneId, zoomed: null }, ...moved);
-      return next;
-    });
-  };
+  /** 분할 해제: 모든 칸의 탭을 지금 칸 하나에 모은다(연결은 그대로). */
+  const doUnsplit = () => setDesk((d) => desks.unsplitAll(d));
 
   /** 연결된 창이 있으면 닫기 전에 묻는다('다시 묻지 않음'을 고르면 그다음부터는 바로 닫는다). */
   const requestClose = (ids: string[], run: () => void) => {
@@ -196,47 +277,35 @@ export function App() {
     setConfirm({ names: [...new Set(live.map((id) => panes[id]?.title ?? "터미널"))], run });
   };
 
-  const doClosePane = (paneId: string) => requestClose([paneId], () => reallyClosePane(paneId));
-
-  const reallyClosePane = (paneId: string) => {
-    const tab = tabOf(paneId);
-    if (!tab) return;
-    const root = closePane(tab.root, paneId);
-    void terms.disposePane(paneId);
-    setPanes(({ [paneId]: _, ...rest }) => rest);
-    if (!root) return removeTab(tab.id);
-    updateTab(tab.id, (t) => ({ ...t, root, activePane: paneIds(root)[0], zoomed: null }));
-  };
-
-  const removeTab = (tabId: string) => {
-    const i = tabs.findIndex((t) => t.id === tabId);
-    const next = tabs.filter((t) => t.id !== tabId);
-    setTabs(next);
-    if (tabId === activeTabId) setActiveTabId(next[Math.min(i, next.length - 1)]?.id ?? null);
-  };
-
-  const closeTab = (tab: Tab) => requestClose(paneIds(tab.root), () => reallyCloseTab(tab));
-
-  const reallyCloseTab = (tab: Tab) => {
-    const ids = paneIds(tab.root);
+  const reallyCloseTabs = (ids: string[]) => {
+    const gone = new Set(ids);
     ids.forEach((id) => void terms.disposePane(id));
-    setPanes((p) => Object.fromEntries(Object.entries(p).filter(([id]) => !ids.includes(id))));
-    removeTab(tab.id);
+    setPanes((p) => Object.fromEntries(Object.entries(p).filter(([id]) => !gone.has(id))));
+    setSftpPanes((s) => new Set([...s].filter((id) => !gone.has(id))));
+    setSearchPane((s) => (s && gone.has(s) ? null : s));
+    setDesk((d) => desks.closeTabs(d, ids));
   };
+
+  /** 여러 탭을 한꺼번에 닫는다(연결된 것이 있으면 한 번만 묻는다). */
+  const closeTabs = (ids: string[]) => ids.length && requestClose(ids, () => reallyCloseTabs(ids));
+  const closeTab = (paneId: string) => closeTabs([paneId]);
 
   const run = (action: string, paneId: string) => {
     switch (action) {
       case "split-row": return doSplit(paneId, "row");
       case "split-column": return doSplit(paneId, "column");
       case "zoom": return doZoom(paneId);
-      case "close": return doClosePane(paneId);
+      case "close": return closeTab(paneId);
       case "copy": return terms.copySelection(paneId);
       case "paste": return void terms.pasteInto(paneId);
       case "clear": return terms.clearPane(paneId);
+      case "search": return setSearchPane(paneId);
+      case "broadcast": return toggleBroadcast();
+      case "sftp": return panes[paneId]?.ssh ? toggleSftp(paneId) : setNotice("파일 창은 SSH 세션에서만 열 수 있습니다.");
     }
   };
 
-  const activeLive = !!activeTab && terms.paneStatus(activeTab.activePane) !== "closed";
+  const activeLive = !!activeId && terms.paneStatus(activeId) !== "closed";
 
   // 단축키: xterm이 먹지 않게 걸러내고, 창(window)에서 처리한다.
   useEffect(() => {
@@ -249,13 +318,17 @@ export function App() {
         e.preventDefault();
         return picker ? closePicker() : setPicker(true);
       }
-      if (picker) return;
+      if (picker || snippets) return;
       switch (action) {
+        case "snippets":
+          e.preventDefault();
+          if (confirm || editing || showSettings) return;
+          return void openSnippets();
         case "reconnect":
           // 앱 화면이 새로고침되지 않도록 늘 막는다.
           e.preventDefault();
-          if (!activeTab || confirm || editing) return;
-          return void terms.reconnect(activeTab.activePane);
+          if (!activeId || confirm || editing) return;
+          return void terms.reconnect(activeId);
         case "sidebar": e.preventDefault(); return toggleSidebar();
         case "fullscreen": e.preventDefault(); return void toggleFullscreen();
         case "settings": e.preventDefault(); return setShowSettings(true);
@@ -263,32 +336,140 @@ export function App() {
         case "font-down": e.preventDefault(); return bumpFontSize(-1);
         case "font-reset": e.preventDefault(); return updateSettings({ fontSize: DEFAULT_SETTINGS.fontSize });
       }
-      if (!action || !activeTab || confirm || editing) return;
+      if (!action || !activeId || confirm || editing) return;
       e.preventDefault();
-      run(action, activeTab.activePane);
+      run(action, activeId);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  /** 터미널을 오른쪽 클릭했을 때 */
   const menuItems = (paneId: string): MenuItem[] => {
-    const tab = tabOf(paneId);
-    const split = !!tab && isSplit(tab.root);
-    const full = !!tab && paneIds(tab.root).length >= MAX_PANES;
+    const g = desks.groupOf(desk, paneId);
+    const multi = groupCount > 1;
+    const full = groupCount >= MAX_PANES;
+    const ssh = !!panes[paneId]?.ssh;
+    const closed = terms.paneStatus(paneId) === "closed";
     return [
+      ...(closed ? ([{ label: "다시 연결", shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => void terms.reconnect(paneId) }, "separator"] as MenuItem[]) : []),
       { label: "오른쪽으로 분할", shortcut: "Alt+Shift+→", disabled: full, onSelect: () => doSplit(paneId, "row") },
       { label: "아래로 분할", shortcut: "Alt+Shift+↓", disabled: full, onSelect: () => doSplit(paneId, "column") },
-      { label: "4분할로 나누기", disabled: split, onSelect: () => doQuad(paneId) },
+      { label: "4분할로 나누기", disabled: groupCount + 3 > MAX_PANES, onSelect: () => doQuad(paneId) },
       "separator",
-      { label: tab?.zoomed ? "분할 화면으로 돌아가기" : "이 창만 크게 보기", shortcut: `${K}Z`, disabled: !split, onSelect: () => doZoom(paneId) },
-      { label: "분할 해제 · 나머지는 새 탭으로", disabled: !split, onSelect: () => doUnsplit(paneId) },
+      { label: desk.zoomed ? "분할 화면으로 돌아가기" : "이 칸만 크게 보기", shortcut: `${K}Z`, disabled: !multi, onSelect: () => doZoom(paneId) },
+      { label: "분할 해제 · 모든 탭을 한 칸으로", disabled: !multi, onSelect: doUnsplit },
+      { label: desk.broadcast ? "동시 입력 끄기" : "동시 입력 켜기 · 보이는 모든 칸", shortcut: `${K}I`, disabled: !multi, onSelect: toggleBroadcast },
+      "separator",
+      { label: "찾기", shortcut: isMac ? "⌘F" : `${K}F`, onSelect: () => setSearchPane(paneId) },
+      { label: "명령 모음…", shortcut: `${K}S`, onSelect: () => void openSnippets() },
+      ...(ssh ? ([{ label: sftpPanes.has(paneId) ? "파일 창 닫기" : "파일 창 열기 (SFTP)", shortcut: `${K}O`, onSelect: () => toggleSftp(paneId) }] as MenuItem[]) : []),
       "separator",
       { label: "복사", shortcut: `${K}C`, onSelect: () => terms.copySelection(paneId) },
       { label: "붙여넣기", shortcut: `${K}V`, onSelect: () => void terms.pasteInto(paneId) },
       { label: "화면 지우기", shortcut: `${K}K`, onSelect: () => terms.clearPane(paneId) },
       "separator",
-      { label: "창 닫기", shortcut: `${K}W`, danger: true, onSelect: () => doClosePane(paneId) },
+      { label: g && g.tabs.length > 1 ? "탭 닫기" : "칸 닫기", shortcut: isMac ? "⌘W" : `${K}W`, danger: true, onSelect: () => closeTab(paneId) },
     ];
+  };
+
+  /** 탭을 오른쪽 클릭했을 때 (파이참 탭 메뉴처럼) */
+  const tabMenuItems = (paneId: string): MenuItem[] => {
+    const g = desks.groupOf(desk, paneId);
+    if (!g) return [];
+    const i = g.tabs.indexOf(paneId);
+    const full = groupCount >= MAX_PANES;
+    const alone = g.tabs.length === 1;
+    const closed = terms.paneStatus(paneId) === "closed";
+    return [
+      { label: "같은 세션을 새 탭으로", onSelect: () => openTab(panes[paneId]?.sessionId ?? null, undefined, g.id) },
+      ...(closed ? ([{ label: "다시 연결", shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => terms.reconnect(paneId) }] as MenuItem[]) : []),
+      "separator",
+      { label: "오른쪽으로 분할 · 새로 연결", disabled: full, onSelect: () => doSplit(paneId, "row") },
+      { label: "아래로 분할 · 새로 연결", disabled: full, onSelect: () => doSplit(paneId, "column") },
+      { label: "오른쪽 칸으로 옮기기", disabled: full || alone, onSelect: () => moveToSplit(paneId, "right") },
+      { label: "아래 칸으로 옮기기", disabled: full || alone, onSelect: () => moveToSplit(paneId, "bottom") },
+      ...(groupCount > 1 ? ([{ label: "분할 해제 · 모든 탭을 한 칸으로", onSelect: doUnsplit }] as MenuItem[]) : []),
+      "separator",
+      { label: "탭 닫기", shortcut: isMac ? "⌘W" : undefined, onSelect: () => closeTab(paneId) },
+      { label: "다른 탭 모두 닫기", disabled: alone, onSelect: () => closeTabs(g.tabs.filter((t) => t !== paneId)) },
+      { label: "왼쪽 탭 모두 닫기", disabled: i === 0, onSelect: () => closeTabs(g.tabs.slice(0, i)) },
+      { label: "오른쪽 탭 모두 닫기", disabled: i === g.tabs.length - 1, onSelect: () => closeTabs(g.tabs.slice(i + 1)) },
+      "separator",
+      { label: groupCount > 1 ? "이 칸의 탭 모두 닫기" : "모든 탭 닫기", danger: true, onSelect: () => closeTabs(g.tabs) },
+    ];
+  };
+
+  // ---- 탭 끌어서 옮기기 (파이참처럼) ----
+  // 다른 칸의 탭 줄에 놓으면 그 칸으로, 칸의 가장자리에 놓으면 그쪽에 새 칸을 만들고,
+  // 칸 한가운데에 놓으면 그 칸의 탭으로 넣는다.
+  // HTML 드래그(draggable)는 Windows에서 파일 끌어다 놓기 설정과 부딪혀서 마우스 이벤트로 직접 만든다.
+
+  const deskRef = useRef(desk);
+  deskRef.current = desk;
+
+  const targetAt = (x: number, y: number, paneId: string): DropTarget => {
+    const d = deskRef.current;
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    const bar = el.closest<HTMLElement>("[data-group-bar]");
+    if (bar) {
+      const groupId = bar.dataset.groupBar!;
+      const chips = [...bar.querySelectorAll<HTMLElement>("[data-tab-pane]")];
+      const index = chips.filter((c) => {
+        const r = c.getBoundingClientRect();
+        return r.left + r.width / 2 < x;
+      }).length;
+      const drop: TabDrop = { kind: "bar", groupId, index };
+      return desks.canDrop(d, paneId, drop) ? drop : null;
+    }
+    const body = el.closest<HTMLElement>("[data-group-body]");
+    if (!body) return null;
+    const groupId = body.dataset.groupBody!;
+    const side = sideAt(x, y, body.getBoundingClientRect());
+    if (side) {
+      const drop: TabDrop = { kind: "edge", groupId, side };
+      const src = desks.groupOf(d, paneId);
+      // 칸이 꽉 찼으면 새 칸을 만들 수 없다(자기 칸의 유일한 탭을 옮기는 경우는 칸 수가 그대로).
+      const grows = !(src && src.tabs.length === 1);
+      if (grows && desks.groupOrder(d).length >= MAX_PANES) return null;
+      return desks.canDrop(d, paneId, drop) ? drop : null;
+    }
+    const drop = { kind: "bar" as const, groupId, index: d.groups[groupId]?.tabs.length ?? 0, center: true };
+    return desks.groupOf(d, paneId)?.id !== groupId && desks.canDrop(d, paneId, drop) ? drop : null;
+  };
+
+  const startTabDrag = (e: ReactMouseEvent, paneId: string) => {
+    if (e.button !== 0) return;
+    const label = panes[paneId]?.title ?? "터미널";
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const width = Math.min(box.width, 260);
+    const grab = { dx: Math.min(x0 - box.left, width - 12), dy: y0 - box.top, width };
+    let active = false;
+    let last: DragState | null = null;
+
+    const move = (ev: MouseEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < DRAG_START_PX) return;
+        active = true;
+        document.body.classList.add("dragging-tab");
+      }
+      last = { paneId, label, x: ev.clientX, y: ev.clientY, grab, target: targetAt(ev.clientX, ev.clientY, paneId) };
+      setDrag(last);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("dragging-tab");
+      if (!active) return;
+      setDrag(null);
+      const target = last?.target;
+      if (target) setDesk((d) => desks.moveTab(d, paneId, target, newId()));
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   };
 
   // Ctrl(⌘)+마우스 휠로 글자 크기 조절
@@ -323,10 +504,11 @@ export function App() {
   onCloseTabKey.current = () => {
     if (confirm) return setConfirm(null);
     if (editing) return setEditing(null);
+    if (snippets) return closeSnippets();
     if (picker) return closePicker();
     if (showSettings) return setShowSettings(false);
     if (menu) return setMenu(null);
-    if (activeTab) return closeTab(activeTab);
+    if (activeId) return closeTab(activeId);
     void getCurrentWindow().close();
   };
   useEffect(() => {
@@ -355,6 +537,26 @@ export function App() {
     if (isNew) openTab(saved.id, list);
   };
 
+  const duplicateSession = async (s: Session) => {
+    try {
+      const copy = await api.sessionDuplicate(s.id);
+      setSessions(await api.sessionsList());
+      setEditing({ session: copy });
+      setNotice(`'${copy.name}'을 만들었습니다. 호스트만 바꿔 저장하세요.`);
+    } catch (e) {
+      setNotice(`복제하지 못했습니다: ${errorText(e)}`);
+    }
+  };
+
+  const saveSnippet = async (s: Snippet) => {
+    await api.snippetSave(s);
+    setSnippets(await api.snippetsList());
+  };
+  const deleteSnippet = async (s: Snippet) => {
+    await api.snippetDelete(s.id);
+    setSnippets(await api.snippetsList());
+  };
+
   const deleteSession = async (s: Session) => {
     if (!window.confirm(`'${s.name}' 세션을 지울까요? 보관함에 저장된 비밀번호와 키도 함께 지워집니다.`)) return;
     await api.sessionDelete(s.id);
@@ -364,16 +566,24 @@ export function App() {
 
   const closePicker = () => {
     setPicker(false);
-    if (activeTab) requestAnimationFrame(() => terms.focusPane(activeTab.activePane));
+    if (activeId) requestAnimationFrame(() => terms.focusPane(activeId));
   };
 
   const lock = () => requestClose(Object.keys(panes), () => void reallyLock());
 
   const reallyLock = async () => {
+    firstLaunch.current = false;
+    setEditing(null);
+    setPicker(false);
+    setSnippets(null);
+    setShowSettings(false);
+    setConfirm(null);
+    setMenu(null);
+    setSearchPane(null);
+    setSftpPanes(new Set());
     await terms.disposeAll();
-    setTabs([]);
+    setDesk(emptyDesk);
     setPanes({});
-    setActiveTabId(null);
     await api.vaultLock();
     await refresh();
   };
@@ -389,19 +599,50 @@ export function App() {
     }
   };
 
+  // 자동 잠금: 설정한 시간 동안 키보드·마우스 입력이 없으면 잠근다(연결도 끊긴다).
+  const lastInput = useRef(Date.now());
+  const lockRef = useRef(reallyLock);
+  lockRef.current = reallyLock;
+  useEffect(() => {
+    const bump = () => (lastInput.current = Date.now());
+    const evs = ["keydown", "mousedown", "wheel", "touchstart"] as const;
+    evs.forEach((ev) => window.addEventListener(ev, bump, { capture: true, passive: true }));
+    return () => evs.forEach((ev) => window.removeEventListener(ev, bump, { capture: true }));
+  }, []);
+  useEffect(() => {
+    const minutes = settings.autoLockMinutes;
+    if (!minutes || !status?.unlocked) return;
+    lastInput.current = Date.now();
+    const t = setInterval(() => {
+      if (Date.now() - lastInput.current >= minutes * 60_000) void lockRef.current();
+    }, 15_000);
+    return () => clearInterval(t);
+  }, [settings.autoLockMinutes, status?.unlocked]);
+
+  const setRemember = async (on: boolean) => {
+    try {
+      await api.vaultRemember(on);
+      setStatus(await api.vaultStatus());
+    } catch (e) {
+      setNotice(errorText(e));
+    }
+  };
+
+  const openLogs = async () => {
+    try {
+      const dir = await api.openLogsDir();
+      setNotice(`세션 기록 폴더: ${dir}`);
+    } catch (e) {
+      setNotice(errorText(e));
+    }
+  };
+
   // ---- 화면 ----
 
   if (!status) return null;
-  if (!status.unlocked) return <VaultScreen status={status} onOpened={refresh} />;
+  if (!status.unlocked) return <VaultScreen status={status} onOpened={refresh} autoUnlock={firstLaunch.current} />;
 
-  const activeInfo = activeTab ? panes[activeTab.activePane] : null;
-  /** 탭의 상태: 창 하나라도 연결돼 있으면 연결됨, 다 끊겼으면 끊김 */
-  const tabStatus = (t: Tab): terms.PaneStatus => {
-    const all = paneIds(t.root).map(terms.paneStatus);
-    if (all.includes("live")) return "live";
-    if (all.includes("connecting")) return "connecting";
-    return "closed";
-  };
+  const activeInfo = activeId ? panes[activeId] : null;
 
   return (
     <div className="app">
@@ -420,6 +661,16 @@ export function App() {
           SSHBook
         </div>
         <span style={{ flex: 1 }} />
+        {inTauri && (
+          <button
+            className="icon-btn"
+            aria-label={fullscreen ? "전체 화면 끝내기" : "전체 화면"}
+            title={`${fullscreen ? "전체 화면 끝내기" : "전체 화면"} (F11)`}
+            onClick={() => void toggleFullscreen()}
+          >
+            {fullscreen ? <IconShrink /> : <IconExpand />}
+          </button>
+        )}
         <button className="icon-btn" aria-label="설정" title={`설정 (${isMac ? "⌘" : "Ctrl+"},)`} onClick={() => setShowSettings(true)}>
           <IconSettings />
         </button>
@@ -448,65 +699,37 @@ export function App() {
         )}
 
         <main className="main">
-          <nav className="tabnav" aria-label="열린 세션">
-            <div role="tablist" style={{ display: "contents" }}>
-              {tabs.map((t) => {
-                const st = tabStatus(t);
-                return (
-                <div key={t.id} className={`tab${t.id === activeTabId ? " selected" : ""}${st === "closed" ? " closed" : ""}`}>
-                  <button
-                    role="tab"
-                    aria-selected={t.id === activeTabId}
-                    className="tab-label"
-                    title={panes[t.activePane]?.sub}
-                    onClick={() => setActiveTabId(t.id)}
-                  >
-                    <StatusDot status={st} />
-                    {isSplit(t.root) && <IconSplit width={13} height={13} />}
-                    <span className="t">{panes[t.activePane]?.title ?? "터미널"}</span>
-                  </button>
-                  <button className="close" aria-label="탭 닫기" title="탭 닫기" onClick={() => closeTab(t)}>
-                    <IconClose width={12} height={12} />
-                  </button>
-                </div>
-                );
-              })}
-            </div>
-            <button className="icon-btn ghost new-tab" aria-label="새 탭 (로컬 셸)" title="새 탭 (로컬 셸)" onClick={() => openTab(null)}>
-              <IconPlus width={14} height={14} />
-            </button>
-            <span className="spacer" />
-            {inTauri && (
-              <button
-                className="icon-btn ghost tool"
-                aria-label={fullscreen ? "전체 화면 끝내기" : "전체 화면"}
-                title={`${fullscreen ? "전체 화면 끝내기" : "전체 화면"} (F11)`}
-                onClick={() => void toggleFullscreen()}
-              >
-                {fullscreen ? <IconShrink width={14} height={14} /> : <IconExpand width={14} height={14} />}
-              </button>
-            )}
-          </nav>
-
-          {activeTab ? (
+          {desk.root ? (
             <Workspace
-              tab={activeTab}
+              desk={desk}
               panes={panes}
-              onActivate={(id) => activeTab.activePane !== id && updateTab(activeTab.id, (t) => ({ ...t, activePane: id }))}
-              onMenu={(paneId, x, y) => setMenu({ paneId, x, y })}
+              onActivateTab={(id) => setDesk((d) => desks.activate(d, id))}
+              onActivateGroup={(gid) => setDesk((d) => desks.activateGroup(d, gid))}
+              onCloseTab={closeTab}
+              onTabMenu={(paneId, x, y) => setMenu({ paneId, x, y, kind: "tab" })}
+              onPaneMenu={(paneId, x, y) => setMenu({ paneId, x, y, kind: "pane" })}
+              onNewTab={(gid) => openTab(null, undefined, gid)}
+              onTabDragStart={startTabDrag}
+              dragging={drag?.paneId ?? null}
+              drop={drag?.target ?? null}
               rightClickPaste={settings.rightClickPaste}
-              onUnzoom={() => updateTab(activeTab.id, (t) => ({ ...t, zoomed: null }))}
+              onUnzoom={() => setDesk((d) => ({ ...d, zoomed: null }))}
+              onResize={(path, ratio) => setDesk((d) => desks.resize(d, path, ratio))}
+              searchPane={searchPane}
+              onCloseSearch={() => setSearchPane(null)}
+              sftpPanes={sftpPanes}
+              onToggleSftp={toggleSftp}
+              onToggleBroadcast={toggleBroadcast}
             />
           ) : (
             <div className="welcome">
-              <p>{sidebarHidden ? "위의 + 로 로컬 셸을 열거나, 사이드바를 펼쳐 세션을 고르세요." : "왼쪽에서 세션을 고르거나 + 로 로컬 셸을 여세요."}</p>
-              <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 창에서 {isMac ? "⌘R" : "Ctrl+R"} 다시 연결</p>
+              <p>{sidebarHidden ? "사이드바를 펼쳐 세션을 고르거나 로컬 셸을 여세요." : "왼쪽에서 세션을 고르거나 로컬 셸을 여세요."}</p>
+              <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 탭에서 {isMac ? "⌘R" : "Ctrl+R"} 다시 연결 · 탭을 끌어 칸 가장자리에 놓으면 분할</p>
               <button className="btn" onClick={() => openTab(null)}>
                 <IconPrompt width={14} height={14} /> 로컬 셸 열기
               </button>
             </div>
           )}
-
         </main>
       </div>
 
@@ -532,7 +755,32 @@ export function App() {
           onClose={closePicker}
         />
       )}
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.paneId)} onClose={() => setMenu(null)} />}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.kind === "tab" ? tabMenuItems(menu.paneId) : menuItems(menu.paneId)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {drag && (
+        <>
+          {/* 잡은 탭이 그대로 커서에 붙어 따라온다 */}
+          <div
+            className="drag-ghost"
+            style={{ left: drag.x - drag.grab.dx, top: drag.y - drag.grab.dy, minWidth: drag.grab.width }}
+            aria-hidden
+          >
+            <IconPrompt width={13} height={13} />
+            <span className="t">{drag.label}</span>
+          </div>
+          {drag.target && (
+            <div className="drag-where" style={{ left: drag.x - drag.grab.dx, top: drag.y - drag.grab.dy + 36 }} aria-hidden>
+              {drag.target.kind === "edge" ? SIDE_LABEL[drag.target.side] : drag.target.center ? "이 칸의 탭으로" : "여기로 옮기기"}
+            </div>
+          )}
+        </>
+      )}
       {confirm && (
         <ConfirmClose
           names={confirm.names}
@@ -545,13 +793,39 @@ export function App() {
           }}
         />
       )}
-      {showSettings && <SettingsDialog theme={theme} onTheme={setTheme} onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsDialog
+          theme={theme}
+          onTheme={setTheme}
+          remembered={status.remembered}
+          onRemember={(on) => void setRemember(on)}
+          onOpenLogs={() => void openLogs()}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+      {snippets && (
+        <SnippetsDialog
+          snippets={snippets}
+          canInsert={!!activeId}
+          onInsert={(s, runIt) => {
+            const target = activeId;
+            setSnippets(null);
+            if (target) requestAnimationFrame(() => terms.insertCommand(target, s.command, runIt));
+          }}
+          onSave={saveSnippet}
+          onDelete={deleteSnippet}
+          onClose={closeSnippets}
+        />
+      )}
       {editing && (
         <SessionEditor
+          key={editing.session?.id ?? "new"}
           initial={editing.session}
           groups={groups}
+          sessions={sessions}
           onSave={saveSession}
           onDelete={deleteSession}
+          onDuplicate={duplicateSession}
           onClose={() => setEditing(null)}
         />
       )}
