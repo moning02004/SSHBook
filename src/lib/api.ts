@@ -181,7 +181,7 @@ function createMockBackend(): Backend {
       return id;
     },
     async termWrite(id, data) {
-      // 미리보기: exit를 치면 연결이 끊긴 것처럼 보여 준다(Ctrl+R 재연결 확인용).
+      // 미리보기: exit를 치면 연결이 끊긴 것처럼 보여 준다(⌘R·Ctrl+R 재연결 확인용).
       if (data === "\r") {
         const line = (lines.get(id) ?? "").trim();
         lines.delete(id);

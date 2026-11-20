@@ -361,9 +361,87 @@ fn term_close(state: State<'_, AppState>, id: String) {
     }
 }
 
+/// macOS 메뉴. 기본 메뉴의 ⌘W(창 닫기) 대신 "탭 닫기"를 두고, 누르면 화면에 알린다.
+/// 화면은 탭이 있으면 탭을 닫고, 없으면 창을 닫는다.
+/// 다른 OS에서는 메뉴를 쓰지 않지만 CI(Linux)에서 컴파일은 되도록 막지 않는다.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let name = app.package_info().name.clone();
+    let app_menu = Submenu::with_items(
+        app,
+        &name,
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let file = Submenu::with_items(
+        app,
+        "파일",
+        true,
+        &[&MenuItem::with_id(
+            app,
+            MENU_CLOSE_TAB,
+            "탭 닫기",
+            true,
+            Some("CmdOrCtrl+W"),
+        )?],
+    )?;
+    // 편집 메뉴가 있어야 입력칸에서 ⌘C·⌘V·⌘A가 동작한다.
+    let edit = Submenu::with_items(
+        app,
+        "편집",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window = Submenu::with_items(
+        app,
+        "윈도우",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &file, &edit, &window])
+}
+
+const MENU_CLOSE_TAB: &str = "close-tab";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|_app| {
+            #[cfg(target_os = "macos")]
+            _app.set_menu(app_menu(_app.handle())?)?;
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            use tauri::Emitter;
+            if event.id().as_ref() == MENU_CLOSE_TAB {
+                let _ = app.emit("menu-close-tab", ());
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

@@ -32,7 +32,7 @@ const K = isMac ? "⌘⇧" : "Ctrl+Shift+";
 
 const SHORTCUTS: [string, string][] = [
   ["호스트 목록", isMac ? "⌘D" : "Alt+D"],
-  ["끊긴 창 다시 연결", "Ctrl+R"],
+  ["끊긴 창 다시 연결", isMac ? "⌘R" : "Ctrl+R"],
   ["설정 열기", `${MOD},`],
   ["글자 크게 / 작게 / 원래대로", `${MOD}= / ${MOD}- / ${MOD}0`],
   ["사이드바 접기·펼치기", `${K}B`],
@@ -41,6 +41,7 @@ const SHORTCUTS: [string, string][] = [
   ["이 창만 크게 보기", `${K}Z`],
   ["복사 / 붙여넣기", `${K}C / ${K}V`],
   ["화면 지우기", `${K}K`],
+  ...(isMac ? ([["탭 닫기 (탭이 없으면 창 닫기)", "⌘W"]] as [string, string][]) : []),
   ["창 닫기", `${K}W`],
 ];
 

@@ -75,7 +75,7 @@ const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const early = new Map<string, Uint8Array[]>();
 const earlyExit = new Map<string, number | null>();
 
-const RECONNECT_HINT = "Ctrl+R로 다시 연결";
+const RECONNECT_HINT = `${navigator.platform.toLowerCase().includes("mac") ? "⌘R" : "Ctrl+R"}로 다시 연결`;
 
 function showExit(e: PaneEntry, code: number | null) {
   setStatus(e, "closed");

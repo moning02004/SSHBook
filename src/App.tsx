@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ConfirmClose } from "./components/ConfirmClose";
@@ -57,14 +58,15 @@ function shortcutOf(e: KeyboardEvent): string | null {
 }
 
 /**
- * 끊긴 창 다시 연결: Ctrl+R(맥에서도 ⌘가 아니라 Ctrl).
- * 셸에서 Ctrl+R(기록 검색)을 써야 하므로, 연결된 창에서는 셸로 보낸다.
+ * 끊긴 창 다시 연결.
+ * 맥은 ⌘R: 셸과 겹치지 않으니 늘 가로챈다(연결된 창에서는 아무 일도 하지 않고, 페이지 새로고침도 막는다).
+ * 그 밖은 Ctrl+R: 셸의 기록 검색과 겹치므로 연결된 창에서는 셸로 보낸다.
  * activeLive: 지금 고른 창이 연결돼 있는지(창이 없으면 false)
  */
-function ctrlShortcutOf(e: KeyboardEvent, activeLive: boolean): string | null {
-  if (e.type !== "keydown" || !e.ctrlKey || e.shiftKey || e.altKey || e.metaKey || activeLive) return null;
-  if (e.code === "KeyR") return "reconnect";
-  return null;
+function reconnectShortcutOf(e: KeyboardEvent, activeLive: boolean): string | null {
+  if (e.type !== "keydown" || e.code !== "KeyR" || e.shiftKey || e.altKey) return null;
+  if (isMac) return e.metaKey && !e.ctrlKey ? "reconnect" : null;
+  return e.ctrlKey && !e.metaKey && !activeLive ? "reconnect" : null;
 }
 const K = isMac ? "⌘⇧" : "Ctrl+Shift+";
 
@@ -238,7 +240,7 @@ export function App() {
 
   // 단축키: xterm이 먹지 않게 걸러내고, 창(window)에서 처리한다.
   useEffect(() => {
-    const actionOf = (e: KeyboardEvent) => shortcutOf(e) ?? ctrlShortcutOf(e, activeLive);
+    const actionOf = (e: KeyboardEvent) => shortcutOf(e) ?? reconnectShortcutOf(e, activeLive);
     terms.setShortcutFilter((e) => actionOf(e) !== null);
     const onKey = (e: KeyboardEvent) => {
       const action = actionOf(e);
@@ -250,8 +252,9 @@ export function App() {
       if (picker) return;
       switch (action) {
         case "reconnect":
-          if (!activeTab || confirm || editing) return;
+          // 앱 화면이 새로고침되지 않도록 늘 막는다.
           e.preventDefault();
+          if (!activeTab || confirm || editing) return;
           return void terms.reconnect(activeTab.activePane);
         case "sidebar": e.preventDefault(); return toggleSidebar();
         case "fullscreen": e.preventDefault(); return void toggleFullscreen();
@@ -312,6 +315,23 @@ export function App() {
       e.preventDefault();
       setConfirm({ names: [...new Set(live.map((id) => all[id]?.title ?? "터미널"))], run: () => void w.destroy() });
     });
+    return () => void un.then((f) => f());
+  }, []);
+
+  // macOS ⌘W(메뉴의 '탭 닫기'): 열린 대화상자 → 지금 탭 순서로 닫고, 탭이 없으면 창을 닫는다.
+  const onCloseTabKey = useRef(() => {});
+  onCloseTabKey.current = () => {
+    if (confirm) return setConfirm(null);
+    if (editing) return setEditing(null);
+    if (picker) return closePicker();
+    if (showSettings) return setShowSettings(false);
+    if (menu) return setMenu(null);
+    if (activeTab) return closeTab(activeTab);
+    void getCurrentWindow().close();
+  };
+  useEffect(() => {
+    if (!inTauri) return;
+    const un = listen("menu-close-tab", () => onCloseTabKey.current());
     return () => void un.then((f) => f());
   }, []);
 
@@ -480,7 +500,7 @@ export function App() {
           ) : (
             <div className="welcome">
               <p>{sidebarHidden ? "위의 + 로 로컬 셸을 열거나, 사이드바를 펼쳐 세션을 고르세요." : "왼쪽에서 세션을 고르거나 + 로 로컬 셸을 여세요."}</p>
-              <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 창에서 Ctrl+R 다시 연결</p>
+              <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 창에서 {isMac ? "⌘R" : "Ctrl+R"} 다시 연결</p>
               <button className="btn" onClick={() => openTab(null)}>
                 <IconPrompt width={14} height={14} /> 로컬 셸 열기
               </button>
