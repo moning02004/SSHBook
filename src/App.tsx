@@ -1,10 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ConfirmClose } from "./components/ConfirmClose";
 import { SettingsDialog, useSettings } from "./components/SettingsDialog";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { IconClose, IconExpand, IconMoon, IconPlus, IconPrompt, IconSettings, IconShrink, IconSidebar, IconSplit, IconSun } from "./components/Icons";
+import { HostPicker } from "./components/HostPicker";
 import { SessionEditor } from "./components/SessionEditor";
+import { StatusDot } from "./components/StatusDot";
 import { Sidebar } from "./components/Sidebar";
 import { VaultScreen } from "./components/VaultScreen";
 import { Workspace, type PaneInfo, type Tab } from "./components/Workspace";
@@ -25,6 +27,9 @@ const isMac = navigator.platform.toLowerCase().includes("mac");
 function shortcutOf(e: KeyboardEvent): string | null {
   if (e.type !== "keydown") return null;
   if (e.key === "F11") return "fullscreen";
+  // 호스트 목록: 맥은 ⌘D, 그 밖은 Alt+D. 셸의 Ctrl+D(EOF)와 겹치지 않게 한다.
+  // 한글 입력 상태에서도 동작하도록 물리 키로 본다.
+  if (e.code === "KeyD" && !e.shiftKey && !e.ctrlKey && (isMac ? e.metaKey && !e.altKey : e.altKey && !e.metaKey)) return "hosts";
   if (e.altKey && e.shiftKey && e.key === "ArrowRight") return "split-row";
   if (e.altKey && e.shiftKey && e.key === "ArrowDown") return "split-column";
   const mod = isMac ? e.metaKey : e.ctrlKey;
@@ -48,6 +53,17 @@ function shortcutOf(e: KeyboardEvent): string | null {
   }
   return null;
 }
+
+/**
+ * 끊긴 창 다시 연결: Ctrl+R(맥에서도 ⌘가 아니라 Ctrl).
+ * 셸에서 Ctrl+R(기록 검색)을 써야 하므로, 연결된 창에서는 셸로 보낸다.
+ * activeLive: 지금 고른 창이 연결돼 있는지(창이 없으면 false)
+ */
+function ctrlShortcutOf(e: KeyboardEvent, activeLive: boolean): string | null {
+  if (e.type !== "keydown" || !e.ctrlKey || e.shiftKey || e.altKey || e.metaKey || activeLive) return null;
+  if (e.code === "KeyR") return "reconnect";
+  return null;
+}
 const K = isMac ? "⌘⇧" : "Ctrl+Shift+";
 
 export function App() {
@@ -66,6 +82,16 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [confirm, setConfirm] = useState<{ names: string[]; run: () => void } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [picker, setPicker] = useState(false);
+  // 창의 연결 상태가 바뀌면 다시 그린다(탭·사이드바의 상태 점).
+  useSyncExternalStore(terms.subscribeStatus, terms.statusSnapshot);
+
+  // 알림은 잠깐 보였다가 사라진다.
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), 5000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   const toggleSidebar = () =>
     setSidebarHidden((v) => {
@@ -97,17 +123,17 @@ export function App() {
   const tabOf = (paneId: string) => tabs.find((t) => paneIds(t.root).includes(paneId)) ?? null;
   const updateTab = (tabId: string, fn: (t: Tab) => Tab) => setTabs((all) => all.map((t) => (t.id === tabId ? fn(t) : t)));
 
-  const infoFor = (sessionId: string | null): PaneInfo => {
-    const s = sessions.find((x) => x.id === sessionId);
+  const infoFor = (sessionId: string | null, list: Session[] = sessions): PaneInfo => {
+    const s = list.find((x) => x.id === sessionId);
     return s ? { sessionId: s.id, title: s.name, sub: describeSession(s) } : { sessionId: null, title: "로컬 셸", sub: "기본 셸" };
   };
 
   // ---- 탭과 창 조작 ----
 
-  const openTab = (sessionId: string | null) => {
+  const openTab = (sessionId: string | null, list?: Session[]) => {
     const paneId = newId();
     const tab: Tab = { id: newId(), root: pane(paneId), activePane: paneId, zoomed: null };
-    setPanes((p) => ({ ...p, [paneId]: infoFor(sessionId) }));
+    setPanes((p) => ({ ...p, [paneId]: infoFor(sessionId, list) }));
     setTabs((all) => [...all, tab]);
     setActiveTabId(tab.id);
   };
@@ -200,12 +226,25 @@ export function App() {
     }
   };
 
+  const activeLive = !!activeTab && terms.paneStatus(activeTab.activePane) !== "closed";
+
   // 단축키: xterm이 먹지 않게 걸러내고, 창(window)에서 처리한다.
   useEffect(() => {
-    terms.setShortcutFilter((e) => shortcutOf(e) !== null);
+    const actionOf = (e: KeyboardEvent) => shortcutOf(e) ?? ctrlShortcutOf(e, activeLive);
+    terms.setShortcutFilter((e) => actionOf(e) !== null);
     const onKey = (e: KeyboardEvent) => {
-      const action = shortcutOf(e);
+      const action = actionOf(e);
+      if (action === "hosts") {
+        if (confirm || editing || showSettings) return;
+        e.preventDefault();
+        return picker ? closePicker() : setPicker(true);
+      }
+      if (picker) return;
       switch (action) {
+        case "reconnect":
+          if (!activeTab || confirm || editing) return;
+          e.preventDefault();
+          return void terms.reconnect(activeTab.activePane);
         case "sidebar": e.preventDefault(); return toggleSidebar();
         case "fullscreen": e.preventDefault(); return void toggleFullscreen();
         case "settings": e.preventDefault(); return setShowSettings(true);
@@ -271,12 +310,21 @@ export function App() {
   // ---- 세션과 보관함 ----
 
   const groups = useMemo(() => [...new Set(sessions.map((s) => s.group?.trim()).filter((g): g is string => !!g))], [sessions]);
-  const connected = useMemo(() => new Set(Object.values(panes).map((p) => p.sessionId).filter((x): x is string => !!x)), [panes]);
+  // 연결이 살아 있는 창이 하나라도 있는 세션
+  const connected = new Set(
+    Object.entries(panes)
+      .filter(([id, p]) => p.sessionId && terms.paneStatus(id) === "live")
+      .map(([, p]) => p.sessionId as string),
+  );
 
   const saveSession = async (s: Session, secret: SecretInput) => {
-    await api.sessionSave(s, secret);
-    setSessions(await api.sessionsList());
+    const isNew = !s.id;
+    const saved = await api.sessionSave(s, secret);
+    const list = await api.sessionsList();
+    setSessions(list);
     setEditing(null);
+    // 새로 만든 세션은 저장하자마자 연결한다.
+    if (isNew) openTab(saved.id, list);
   };
 
   const deleteSession = async (s: Session) => {
@@ -284,6 +332,11 @@ export function App() {
     await api.sessionDelete(s.id);
     setSessions(await api.sessionsList());
     setEditing(null);
+  };
+
+  const closePicker = () => {
+    setPicker(false);
+    if (activeTab) requestAnimationFrame(() => terms.focusPane(activeTab.activePane));
   };
 
   const lock = () => requestClose(Object.keys(panes), () => void reallyLock());
@@ -314,13 +367,13 @@ export function App() {
   if (!status.unlocked) return <VaultScreen status={status} onOpened={refresh} />;
 
   const activeInfo = activeTab ? panes[activeTab.activePane] : null;
-  const hint = !activeTab
-    ? ""
-    : activeTab.zoomed
-      ? `확대 중 — ${K}Z로 돌아가기`
-      : isSplit(activeTab.root)
-        ? `${paneIds(activeTab.root).length}개 창 · 오른쪽 클릭으로 분할 해제`
-        : "오른쪽 클릭으로 창 분할";
+  /** 탭의 상태: 창 하나라도 연결돼 있으면 연결됨, 다 끊겼으면 끊김 */
+  const tabStatus = (t: Tab): terms.PaneStatus => {
+    const all = paneIds(t.root).map(terms.paneStatus);
+    if (all.includes("live")) return "live";
+    if (all.includes("connecting")) return "connecting";
+    return "closed";
+  };
 
   return (
     <div className="app">
@@ -369,8 +422,10 @@ export function App() {
         <main className="main">
           <nav className="tabnav" aria-label="열린 세션">
             <div role="tablist" style={{ display: "contents" }}>
-              {tabs.map((t) => (
-                <div key={t.id} className={`tab${t.id === activeTabId ? " selected" : ""}`}>
+              {tabs.map((t) => {
+                const st = tabStatus(t);
+                return (
+                <div key={t.id} className={`tab${t.id === activeTabId ? " selected" : ""}${st === "closed" ? " closed" : ""}`}>
                   <button
                     role="tab"
                     aria-selected={t.id === activeTabId}
@@ -378,14 +433,16 @@ export function App() {
                     title={panes[t.activePane]?.sub}
                     onClick={() => setActiveTabId(t.id)}
                   >
-                    {isSplit(t.root) ? <IconSplit width={13} height={13} /> : <IconPrompt width={13} height={13} />}
+                    <StatusDot status={st} />
+                    {isSplit(t.root) && <IconSplit width={13} height={13} />}
                     <span className="t">{panes[t.activePane]?.title ?? "터미널"}</span>
                   </button>
                   <button className="close" aria-label="탭 닫기" title="탭 닫기" onClick={() => closeTab(t)}>
                     <IconClose width={12} height={12} />
                   </button>
                 </div>
-              ))}
+                );
+              })}
             </div>
             <button className="icon-btn ghost new-tab" aria-label="새 탭 (로컬 셸)" title="새 탭 (로컬 셸)" onClick={() => openTab(null)}>
               <IconPlus width={14} height={14} />
@@ -415,20 +472,37 @@ export function App() {
           ) : (
             <div className="welcome">
               <p>{sidebarHidden ? "위의 + 로 로컬 셸을 열거나, 사이드바를 펼쳐 세션을 고르세요." : "왼쪽에서 세션을 고르거나 + 로 로컬 셸을 여세요."}</p>
+              <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 창에서 Ctrl+R 다시 연결</p>
               <button className="btn" onClick={() => openTab(null)}>
                 <IconPrompt width={14} height={14} /> 로컬 셸 열기
               </button>
             </div>
           )}
 
-          <footer className="statusbar">
-            <span>{activeInfo ? `${activeInfo.title} · ${activeInfo.sub}` : "연결 없음"}</span>
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{notice}</span>
-            <span>{hint}</span>
-          </footer>
         </main>
       </div>
 
+      {notice && (
+        <div className="toast" role="status" onClick={() => setNotice("")}>
+          {notice}
+        </div>
+      )}
+      {picker && (
+        <HostPicker
+          sessions={sessions}
+          connected={connected}
+          onConnect={(s) => {
+            setPicker(false);
+            openTab(s.id);
+          }}
+          onEdit={(s) => {
+            setPicker(false);
+            setEditing({ session: s });
+          }}
+          onDelete={(s) => void deleteSession(s)}
+          onClose={closePicker}
+        />
+      )}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.paneId)} onClose={() => setMenu(null)} />}
       {confirm && (
         <ConfirmClose

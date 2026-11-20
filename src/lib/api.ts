@@ -118,6 +118,8 @@ function createMockBackend(): Backend {
     { id: "m3", name: "dev-box", group: null, kind: "ssh", host: "dev.internal", port: 2222, user: "dev", auth: "password", hasPassword: true },
   ];
   const dataSubs = new Set<(e: TermData) => void>();
+  const exitSubs = new Set<(e: TermExit) => void>();
+  const lines = new Map<string, string>();
   const toB64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
   const emit = (id: string, text: string) => dataSubs.forEach((cb) => cb({ id, data: toB64(text) }));
   let seq = 0;
@@ -179,7 +181,18 @@ function createMockBackend(): Backend {
       return id;
     },
     async termWrite(id, data) {
-      emit(id, data === "\r" ? "\r\n$ " : data);
+      // 미리보기: exit를 치면 연결이 끊긴 것처럼 보여 준다(Ctrl+R 재연결 확인용).
+      if (data === "\r") {
+        const line = (lines.get(id) ?? "").trim();
+        lines.delete(id);
+        if (line === "exit") {
+          emit(id, "\r\nlogout\r\n");
+          return void setTimeout(() => exitSubs.forEach((cb) => cb({ id, code: 0 })), 30);
+        }
+        return emit(id, "\r\n$ ");
+      }
+      lines.set(id, (lines.get(id) ?? "") + data);
+      emit(id, data);
     },
     async termResize() {},
     async termClose() {},
@@ -190,8 +203,9 @@ function createMockBackend(): Backend {
       dataSubs.add(cb);
       return () => dataSubs.delete(cb);
     },
-    async onTermExit() {
-      return () => {};
+    async onTermExit(cb) {
+      exitSubs.add(cb);
+      return () => exitSubs.delete(cb);
     },
   };
 }
