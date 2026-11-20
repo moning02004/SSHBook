@@ -7,6 +7,8 @@ import { IconClose, IconExpand, IconMoon, IconPlus, IconPrompt, IconSettings, Ic
 import { HostPicker } from "./components/HostPicker";
 import { SessionEditor } from "./components/SessionEditor";
 import { StatusDot } from "./components/StatusDot";
+import { UpdateNotice } from "./components/UpdateNotice";
+import { checkForUpdate } from "./lib/updater";
 import { Sidebar } from "./components/Sidebar";
 import { VaultScreen } from "./components/VaultScreen";
 import { Workspace, type PaneInfo, type Tab } from "./components/Workspace";
@@ -85,6 +87,12 @@ export function App() {
   const [picker, setPicker] = useState(false);
   // 창의 연결 상태가 바뀌면 다시 그린다(탭·사이드바의 상태 점).
   useSyncExternalStore(terms.subscribeStatus, terms.statusSnapshot);
+
+  // 앱을 켜고 조금 뒤 새 버전을 조용히 확인한다(실패해도 알리지 않는다).
+  useEffect(() => {
+    const t = setTimeout(() => void checkForUpdate(false), 3000);
+    return () => clearTimeout(t);
+  }, []);
 
   // 알림은 잠깐 보였다가 사라진다.
   useEffect(() => {
@@ -482,6 +490,7 @@ export function App() {
         </main>
       </div>
 
+      <UpdateNotice liveCount={Object.keys(panes).filter((id) => terms.paneStatus(id) === "live").length} />
       {notice && (
         <div className="toast" role="status" onClick={() => setNotice("")}>
           {notice}

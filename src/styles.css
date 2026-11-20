@@ -282,3 +282,14 @@ select.input { appearance: none; padding-right: 32px; cursor: pointer; backgroun
 .picker-foot { display: flex; gap: 16px; padding: 10px 16px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--muted); }
 .picker-foot kbd { display: inline-block; min-width: 18px; margin-right: 3px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); font-family: var(--mono); font-size: 10px; text-align: center; }
 @media (max-width: 480px) { .picker-row .badge { display: none; } .picker-row .actions { opacity: 1; } }
+
+/* ---- 업데이트 알림 ---- */
+.update-card { position: fixed; z-index: 44; right: 16px; bottom: 16px; width: min(340px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: var(--pop); }
+.update-title { font-weight: 600; font-size: 13px; }
+.update-card .btn.primary.subtle { height: 30px; }
+.progress { height: 6px; border-radius: 3px; background: var(--soft); border: 1px solid var(--line-soft); overflow: hidden; }
+.progress span { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.2s; }
+.progress span.indeterminate { animation: progress-slide 1.2s ease-in-out infinite; }
+@keyframes progress-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .progress span.indeterminate { animation: none; } }
+.update-card ~ .toast { bottom: 150px; }

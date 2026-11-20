@@ -1,4 +1,4 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   FONT_PRESETS,
   FONT_SIZE,
@@ -13,6 +13,7 @@ import {
   type CursorStyle,
 } from "../lib/settings";
 import type { ThemeName } from "../lib/theme";
+import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
 import { IconClose } from "./Icons";
 
 export function useSettings() {
@@ -190,6 +191,8 @@ export function SettingsDialog({ theme, onTheme, onClose }: Props) {
             {seg<ThemeName>("테마", theme, [["light", "라이트"], ["dark", "다크"]], onTheme)}
           </section>
 
+          <UpdateSection />
+
           <section className="settings-section">
             <h3>단축키</h3>
             <dl className="shortcuts">
@@ -215,5 +218,48 @@ export function SettingsDialog({ theme, onTheme, onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** 지금 버전과 업데이트 확인 */
+function UpdateSection() {
+  const [version, setVersion] = useState("");
+  const st = useUpdateState();
+  useEffect(() => void appVersion().then(setVersion), []);
+
+  const busy = st.phase === "checking" || st.phase === "downloading" || st.phase === "installing";
+  const status =
+    st.phase === "checking" ? "확인하는 중…"
+    : st.phase === "latest" ? "최신 버전입니다."
+    : st.phase === "available" ? `새 버전 v${st.version}이 있습니다.`
+    : st.phase === "downloading" ? `v${st.version} 내려받는 중${st.percent !== null ? ` · ${st.percent}%` : "…"}`
+    : st.phase === "installing" ? "설치 중… 곧 다시 시작합니다."
+    : st.phase === "error" ? st.message
+    : "";
+
+  return (
+    <section className="settings-section">
+      <h3>업데이트</h3>
+      <div className="row-gap" style={{ alignItems: "center" }}>
+        <span style={{ flex: 1 }}>
+          지금 버전 <b style={{ fontFamily: "var(--mono)" }}>{version && version !== "미리보기" ? `v${version}` : version}</b>
+        </span>
+        {st.phase === "available" ? (
+          <button className="btn primary" onClick={() => void installUpdate()}>
+            지금 업데이트
+          </button>
+        ) : (
+          <button className="btn" disabled={busy} onClick={() => void checkForUpdate(true)}>
+            업데이트 확인
+          </button>
+        )}
+      </div>
+      {status && (
+        <p className="hint" role="status" style={st.phase === "error" ? { color: "var(--danger)" } : undefined}>
+          {status}
+        </p>
+      )}
+      <p className="hint">새 버전은 GitHub 릴리스에서 받습니다. 앱을 켤 때도 자동으로 확인합니다.</p>
+    </section>
   );
 }

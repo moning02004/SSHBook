@@ -2,6 +2,11 @@
 #
 # 쓰는 법: 버전 태그를 올리면 Windows·macOS 설치 파일을 만들어 릴리스에 붙인다.
 #   git tag v0.1.0 && git push origin v0.1.0
+# 태그 버전은 tauri.conf.json의 version과 같아야 한다(앱 안 업데이트가 이 번호로 새 버전을 알아본다).
+#
+# 앱 안 업데이트: 설치 파일과 함께 서명(.sig)과 latest.json을 릴리스에 올린다.
+# 저장소 Secrets에 TAURI_SIGNING_PRIVATE_KEY(개인 키 파일 내용)와
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD(키 암호)가 있어야 한다.
 # Actions 탭에서 "Run workflow"로 직접 돌릴 수도 있다(이때는 지금 버전으로 릴리스를 만든다).
 name: Release
 
@@ -52,6 +57,8 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: SSHBook v__VERSION__
@@ -61,6 +68,9 @@ jobs:
             - **macOS** (Intel·Apple Silicon 공용): `SSHBook_x.y.z_universal.dmg`
 
             서명하지 않은 빌드라서 처음 실행할 때 경고가 뜹니다. README의 "설치" 부분을 참고하세요.
+            이미 설치했다면 앱의 업데이트 알림이나 설정 → 업데이트 확인으로 바로 업데이트할 수 있습니다.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+          # latest.json의 Windows 항목은 .msi 대신 setup.exe(NSIS)로
+          updaterJsonPreferNsis: true
