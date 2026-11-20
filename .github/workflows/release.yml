@@ -23,7 +23,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 1) 릴리스를 초안으로 만든다. 초안은 'latest'로 잡히지 않으므로
+  #    빌드가 다 끝나기 전에는 앱이 새 버전을 보지 않는다(반쯤 올라간 latest.json 방지).
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAG="v$VERSION"
+          # 다시 돌릴 때는 이미 있는 릴리스(초안 포함)를 쓴다.
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | sed -n 1p)
+          if [ -z "$ID" ]; then
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "SSHBook $TAG" --notes-file - <<'NOTES'
+          ## 내려받기
+          - **Windows**: `SSHBook_x.y.z_x64-setup.exe`(설치 프로그램) 또는 `.msi`
+          - **macOS** (Intel·Apple Silicon 공용): `SSHBook_x.y.z_universal.dmg`
+
+          서명하지 않은 빌드라서 처음 실행할 때 경고가 뜹니다. README의 "설치" 부분을 참고하세요.
+          이미 설치했다면 앱의 업데이트 알림이나 설정 → 업데이트 확인으로 바로 업데이트할 수 있습니다.
+          NOTES
+            ID=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | sed -n 1p)
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+  # 2) OS마다 빌드해서 초안 릴리스에 붙인다.
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -60,17 +91,16 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__
-          releaseName: SSHBook v__VERSION__
-          releaseBody: |
-            ## 내려받기
-            - **Windows**: `SSHBook_x.y.z_x64-setup.exe`(설치 프로그램) 또는 `.msi`
-            - **macOS** (Intel·Apple Silicon 공용): `SSHBook_x.y.z_universal.dmg`
-
-            서명하지 않은 빌드라서 처음 실행할 때 경고가 뜹니다. README의 "설치" 부분을 참고하세요.
-            이미 설치했다면 앱의 업데이트 알림이나 설정 → 업데이트 확인으로 바로 업데이트할 수 있습니다.
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.id }}
           args: ${{ matrix.args }}
           # latest.json의 Windows 항목은 .msi 대신 setup.exe(NSIS)로
           updaterJsonPreferNsis: true
+
+  # 3) 모든 OS 빌드가 성공했을 때만 공개한다. 이때부터 앱이 새 버전을 본다.
+  publish:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/${{ needs.create-release.outputs.id }}" -F draft=false -f make_latest=true

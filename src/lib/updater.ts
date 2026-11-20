@@ -60,8 +60,15 @@ export async function checkForUpdate(manual: boolean): Promise<void> {
     if (!manual && dismissed === update.version) return set({ phase: "idle" });
     set({ phase: "available", version: update.version, notes: update.body ?? "" });
   } catch (e) {
-    set(manual ? { phase: "error", message: `업데이트를 확인하지 못했습니다: ${errorText(e)}` } : { phase: "idle" });
+    set(manual ? { phase: "error", message: checkErrorText(e) } : { phase: "idle" });
   }
+}
+
+/** 새 버전의 이 OS용 파일이 아직 안 올라왔을 때(릴리스 빌드 중) 알아듣기 쉽게 바꾼다. */
+function checkErrorText(e: unknown): string {
+  const text = errorText(e);
+  if (/platform/i.test(text)) return "새 버전을 준비하는 중입니다. 잠시 뒤 다시 확인해 주세요.";
+  return `업데이트를 확인하지 못했습니다: ${text}`;
 }
 
 export function dismissUpdate() {
