@@ -12,7 +12,7 @@ import { UpdateNotice } from "./components/UpdateNotice";
 import { checkForUpdate } from "./lib/updater";
 import { Sidebar } from "./components/Sidebar";
 import { VaultScreen } from "./components/VaultScreen";
-import { Workspace, type PaneInfo } from "./components/Workspace";
+import { tabTitle, Workspace, type PaneInfo } from "./components/Workspace";
 import { api, errorText, inTauri, type SecretInput, type VaultStatus } from "./lib/api";
 import { loadFlag, saveFlag, SIDEBAR_HIDDEN } from "./lib/prefs";
 import { bumpFontSize, DEFAULT_SETTINGS, updateSettings } from "./lib/settings";
@@ -37,6 +37,14 @@ function shortcutOf(e: KeyboardEvent): string | null {
   if (e.code === "KeyD" && !e.shiftKey && !e.ctrlKey && (isMac ? e.metaKey && !e.altKey : e.altKey && !e.metaKey)) return "hosts";
   // 찾기: 맥은 ⌘F. 그 밖은 Ctrl+F가 셸 단축키(앞으로 한 글자)라서 Ctrl+Shift+F만 쓴다.
   if (isMac && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.code === "KeyF") return "search";
+  // 탭 넘기기: Ctrl+Tab / Ctrl+Shift+Tab (맥·Windows 같음)
+  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === "Tab") return e.shiftKey ? "tab-prev" : "tab-next";
+  // n번째 탭: 맥 ⌘1~9, Windows Alt+1~9 (9는 마지막 탭)
+  const digit = /^Digit([1-9])$/.exec(e.code)?.[1];
+  if (digit && !e.shiftKey && !e.ctrlKey && (isMac ? e.metaKey && !e.altKey : e.altKey && !e.metaKey)) return `tab-${digit}`;
+  // 칸 이동: 맥 ⌘⌥방향키, Windows Ctrl+Alt+방향키
+  const arrow = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" }[e.key];
+  if (arrow && !e.shiftKey && e.altKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return `focus-${arrow}`;
   if (e.altKey && e.shiftKey && e.key === "ArrowRight") return "split-row";
   if (e.altKey && e.shiftKey && e.key === "ArrowDown") return "split-column";
   const mod = isMac ? e.metaKey : e.ctrlKey;
@@ -113,6 +121,9 @@ export function App() {
   const [fullscreen, setFullscreen] = useState(false);
   const [picker, setPicker] = useState(false);
   const [searchPane, setSearchPane] = useState<string | null>(null);
+  const [renamingTab, setRenamingTab] = useState<string | null>(null);
+  /** 잠금 해제했을 때 다시 열 수 있는 지난번 작업 공간 */
+  const [restoreOffer, setRestoreOffer] = useState<desks.SavedWorkspace | null>(null);
   const [sftpPanes, setSftpPanes] = useState<Set<string>>(() => new Set());
   const [snippets, setSnippets] = useState<Snippet[] | null>(null);
   // 앱을 막 켰을 때만 키체인으로 자동으로 연다. 한 번 잠그면 그다음엔 직접 연다.
@@ -274,7 +285,7 @@ export function App() {
   const requestClose = (ids: string[], run: () => void) => {
     const live = ids.filter(terms.isLive);
     if (!askOnClose || live.length === 0) return run();
-    setConfirm({ names: [...new Set(live.map((id) => panes[id]?.title ?? "터미널"))], run });
+    setConfirm({ names: [...new Set(live.map((id) => tabTitle(panes[id])))], run });
   };
 
   const reallyCloseTabs = (ids: string[]) => {
@@ -302,6 +313,18 @@ export function App() {
       case "search": return setSearchPane(paneId);
       case "broadcast": return toggleBroadcast();
       case "sftp": return panes[paneId]?.ssh ? toggleSftp(paneId) : setNotice("파일 창은 SSH 세션에서만 열 수 있습니다.");
+      case "tab-next": return setDesk((d) => desks.cycleTab(d, 1));
+      case "tab-prev": return setDesk((d) => desks.cycleTab(d, -1));
+    }
+    if (action.startsWith("tab-")) return setDesk((d) => desks.nthTab(d, Number(action.slice(4))));
+    if (action.startsWith("focus-")) {
+      const rects = [...document.querySelectorAll<HTMLElement>("[data-group-id]")].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { id: el.dataset.groupId!, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+      });
+      const from = desk.activeGroup;
+      const to = from ? desks.neighborGroup(rects, from, action.slice(6) as desks.Dir) : null;
+      if (to) setDesk((d) => desks.activateGroup(d, to));
     }
   };
 
@@ -383,6 +406,7 @@ export function App() {
     const closed = terms.paneStatus(paneId) === "closed";
     return [
       { label: "같은 세션을 새 탭으로", onSelect: () => openTab(panes[paneId]?.sessionId ?? null, undefined, g.id) },
+      { label: "탭 이름 바꾸기…", shortcut: "더블클릭", onSelect: () => setRenamingTab(paneId) },
       ...(closed ? ([{ label: "다시 연결", shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => terms.reconnect(paneId) }] as MenuItem[]) : []),
       "separator",
       { label: "오른쪽으로 분할 · 새로 연결", disabled: full, onSelect: () => doSplit(paneId, "row") },
@@ -441,7 +465,7 @@ export function App() {
 
   const startTabDrag = (e: ReactMouseEvent, paneId: string) => {
     if (e.button !== 0) return;
-    const label = panes[paneId]?.title ?? "터미널";
+    const label = tabTitle(panes[paneId]);
     const x0 = e.clientX;
     const y0 = e.clientY;
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -572,6 +596,8 @@ export function App() {
   const lock = () => requestClose(Object.keys(panes), () => void reallyLock());
 
   const reallyLock = async () => {
+    // 잠그면서 화면을 비우는 것은 '모든 탭을 닫은 것'이 아니므로 저장해 둔 배치를 지우지 않는다.
+    skipSave.current = true;
     firstLaunch.current = false;
     setEditing(null);
     setPicker(false);
@@ -637,6 +663,60 @@ export function App() {
     }
   };
 
+  // ---- 작업 공간 저장·복원 ----
+  // 비밀 정보 없이 칸 배치와 탭마다의 세션 id, 바꾼 탭 이름만 이 PC(localStorage)에 둔다.
+
+  const workspaceKey = status ? `sshbook.workspace:${status.path}` : null;
+  const skipSave = useRef(false);
+  /** 이번에 연 뒤로 탭을 한 번이라도 열었는지(처음 빈 화면을 '모두 닫음'으로 저장하지 않게) */
+  const hadTabs = useRef(false);
+
+  // 잠금을 풀면 저장해 둔 배치가 있는지 본다.
+  useEffect(() => {
+    if (!status?.unlocked || !workspaceKey) return;
+    skipSave.current = false;
+    hadTabs.current = false;
+    try {
+      const raw = localStorage.getItem(workspaceKey);
+      const saved = raw ? (JSON.parse(raw) as desks.SavedWorkspace) : null;
+      setRestoreOffer(saved?.v === 1 && desks.savedTabCount(saved) > 0 ? saved : null);
+    } catch {
+      setRestoreOffer(null);
+    }
+  }, [status?.unlocked, workspaceKey]);
+
+  // 배치가 바뀌면 잠시 뒤 저장한다.
+  useEffect(() => {
+    if (!status?.unlocked || !workspaceKey || skipSave.current) return;
+    if (desk.root) hadTabs.current = true;
+    if (!desk.root && !hadTabs.current) return;
+    const t = setTimeout(() => {
+      const saved = desks.saveWorkspace(desk, (id) => {
+        const p = panes[id];
+        return p ? { sessionId: p.sessionId, ...(p.customTitle ? { name: p.customTitle } : {}) } : null;
+      });
+      try {
+        if (saved) localStorage.setItem(workspaceKey, JSON.stringify(saved));
+        else localStorage.removeItem(workspaceKey);
+      } catch {
+        // 저장소를 못 쓰면 복원만 안 될 뿐이다.
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [desk, panes, status?.unlocked, workspaceKey]);
+
+  const restoreWorkspace = () => {
+    if (!restoreOffer) return;
+    const { desk: next, opened } = desks.restoreWorkspace(restoreOffer, (id) => sessions.some((s) => s.id === id), newId);
+    setRestoreOffer(null);
+    if (!next.root) return setNotice("다시 열 탭이 없습니다(세션이 지워졌습니다).");
+    setPanes((p) => ({
+      ...p,
+      ...Object.fromEntries(opened.map(([id, t]) => [id, { ...infoFor(t.sessionId), ...(t.name ? { customTitle: t.name } : {}) }])),
+    }));
+    setDesk(next);
+  };
+
   // ---- 화면 ----
 
   if (!status) return null;
@@ -695,6 +775,14 @@ export function App() {
             onNew={() => setEditing({ session: null })}
             onLock={lock}
             onExport={exportVault}
+            onRenameGroup={async (from, to) => {
+              try {
+                await api.sessionsRenameGroup(from, to);
+                setSessions(await api.sessionsList());
+              } catch (e) {
+                setNotice(`그룹 이름을 바꾸지 못했습니다: ${errorText(e)}`);
+              }
+            }}
           />
         )}
 
@@ -720,9 +808,37 @@ export function App() {
               sftpPanes={sftpPanes}
               onToggleSftp={toggleSftp}
               onToggleBroadcast={toggleBroadcast}
+              renamingTab={renamingTab}
+              onRenameStart={setRenamingTab}
+              onRename={(paneId, name) => {
+                setRenamingTab(null);
+                if (name === null) return;
+                const custom = name.trim();
+                setPanes((p) => (p[paneId] ? { ...p, [paneId]: { ...p[paneId], customTitle: custom && custom !== p[paneId].title ? custom : undefined } } : p));
+                requestAnimationFrame(() => terms.focusPane(paneId));
+              }}
             />
           ) : (
             <div className="welcome">
+              {restoreOffer && (
+                <div className="restore-offer" role="region" aria-label="지난번 작업 공간">
+                  <div>
+                    <b>지난번 작업 공간</b>
+                    <span className="hint">
+                      {" "}
+                      칸 {Object.values(restoreOffer.groups).filter((g) => g.tabs.length).length}개 · 탭 {desks.savedTabCount(restoreOffer)}개를 다시 연결합니다.
+                    </span>
+                  </div>
+                  <div className="row-gap">
+                    <button className="btn" onClick={() => setRestoreOffer(null)}>
+                      버리기
+                    </button>
+                    <button className="btn primary" autoFocus onClick={restoreWorkspace}>
+                      다시 열기
+                    </button>
+                  </div>
+                </div>
+              )}
               <p>{sidebarHidden ? "사이드바를 펼쳐 세션을 고르거나 로컬 셸을 여세요." : "왼쪽에서 세션을 고르거나 로컬 셸을 여세요."}</p>
               <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 탭에서 {isMac ? "⌘R" : "Ctrl+R"} 다시 연결 · 탭을 끌어 칸 가장자리에 놓으면 분할</p>
               <button className="btn" onClick={() => openTab(null)}>

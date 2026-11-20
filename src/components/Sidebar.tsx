@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { authLabel, describeSession, filterSessions, groupSessions, type Session } from "../lib/sessions";
+import { authLabel, describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Session } from "../lib/sessions";
 import { IconEdit, IconExport, IconPlus, IconSearch, IconUnlock } from "./Icons";
 
 interface Props {
@@ -12,10 +12,13 @@ interface Props {
   onNew: () => void;
   onLock: () => void;
   onExport: () => void;
+  /** 그룹 이름 바꾸기(빈 이름이면 그룹 없음으로) */
+  onRenameGroup: (from: string, to: string) => void;
 }
 
-export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew, onLock, onExport }: Props) {
+export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew, onLock, onExport, onRenameGroup }: Props) {
   const [query, setQuery] = useState("");
+  const [renaming, setRenaming] = useState<string | null>(null);
   const sections = useMemo(() => groupSessions(filterSessions(sessions, query)), [sessions, query]);
 
   return (
@@ -35,8 +38,34 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
         {sections.map((sec) => (
           <div key={sec.title ?? "_all"}>
             {sec.title && (
-              <div className="section-title">
-                {sec.title} <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
+              <div className="section-title" onDoubleClick={() => sec.title !== UNGROUPED_LABEL && setRenaming(sec.title)}>
+                {renaming === sec.title ? (
+                  <input
+                    className="group-rename"
+                    aria-label="그룹 이름"
+                    autoFocus
+                    defaultValue={sec.title}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setRenaming(null);
+                      if (e.key === "Enter") e.currentTarget.blur();
+                    }}
+                    onBlur={(e) => {
+                      const to = e.currentTarget.value;
+                      setRenaming(null);
+                      if (sec.title && to.trim() !== sec.title) onRenameGroup(sec.title, to);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <span>{sec.title}</span> <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
+                    {sec.title !== UNGROUPED_LABEL && (
+                      <button className="icon-btn ghost xs group-edit" aria-label={`${sec.title} 그룹 이름 바꾸기`} title="그룹 이름 바꾸기 (더블클릭)" onClick={() => setRenaming(sec.title)}>
+                        <IconEdit width={11} height={11} />
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             )}
             {sec.sessions.map((s) => (

@@ -119,6 +119,8 @@ export interface Backend {
   sessionDelete(id: string): Promise<void>;
   /** 같은 설정(저장된 비밀번호·키 포함)으로 "이름 복사" 세션을 만든다 */
   sessionDuplicate(id: string): Promise<Session>;
+  /** 그룹 이름 바꾸기(빈 이름이면 그룹 없음으로). 바뀐 세션 수 */
+  sessionsRenameGroup(from: string, to: string): Promise<number>;
   snippetsList(): Promise<Snippet[]>;
   snippetSave(s: Snippet): Promise<Snippet>;
   snippetDelete(id: string): Promise<void>;
@@ -163,6 +165,7 @@ const tauriBackend: Backend = {
   sessionSave: (session, secret) => invoke("session_save", { session, secret: secret ?? null }),
   sessionDelete: (id) => invoke("session_delete", { id }),
   sessionDuplicate: (id) => invoke("session_duplicate", { id }),
+  sessionsRenameGroup: (from, to) => invoke("sessions_rename_group", { from, to }),
   snippetsList: () => invoke("snippets_list"),
   snippetSave: (snippet) => invoke("snippet_save", { snippet }),
   snippetDelete: (id) => invoke("snippet_delete", { id }),
@@ -301,6 +304,11 @@ function createMockBackend(): Backend {
       const copy = { ...src, id: `m${Date.now()}`, name: `${src.name} 복사` };
       sessions = [...sessions, copy];
       return copy;
+    },
+    async sessionsRenameGroup(from, to) {
+      let n = 0;
+      sessions = sessions.map((s) => (s.group === from ? (n++, { ...s, group: to.trim() || null }) : s));
+      return n;
     },
     async snippetsList() {
       return snippets;

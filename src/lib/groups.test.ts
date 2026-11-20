@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   activate,
   addTab,
+  cycleTab,
+  neighborGroup,
+  nthTab,
+  restoreWorkspace,
+  savedTabCount,
+  saveWorkspace,
   allTabs,
   canDrop,
   closeTabs,
@@ -87,5 +93,62 @@ describe("visible tabs, zoom, quad, unsplit", () => {
     d = unsplitAll(d);
     expect(groupOrder(d)).toEqual(["g1"]);
     expect(allTabs(d).sort()).toEqual(["a", "b", "c", "p", "q", "r"]);
+  });
+});
+
+
+describe("keyboard navigation", () => {
+  // g1 | g2
+  //    | g3
+  const rects = [
+    { id: "g1", left: 0, top: 0, right: 100, bottom: 200 },
+    { id: "g2", left: 110, top: 0, right: 200, bottom: 95 },
+    { id: "g3", left: 110, top: 105, right: 200, bottom: 200 },
+  ];
+  it("finds the pane in that direction", () => {
+    expect(neighborGroup(rects, "g1", "right")).toMatch(/g2|g3/);
+    expect(neighborGroup(rects, "g2", "down")).toBe("g3");
+    expect(neighborGroup(rects, "g3", "up")).toBe("g2");
+    expect(neighborGroup(rects, "g3", "left")).toBe("g1");
+    expect(neighborGroup(rects, "g1", "left")).toBeNull();
+  });
+
+  it("cycles and jumps between tabs", () => {
+    const d = oneGroup(); // a b c, c 보임
+    expect(cycleTab(d, 1).groups.g1.active).toBe("a");
+    expect(cycleTab(d, -1).groups.g1.active).toBe("b");
+    expect(nthTab(d, 1).groups.g1.active).toBe("a");
+    expect(nthTab(d, 9).groups.g1.active).toBe("c");
+    expect(nthTab(d, 5)).toBe(d);
+  });
+});
+
+describe("workspace save/restore", () => {
+  it("round-trips layout, names and the visible tab, dropping deleted sessions", () => {
+    let d = splitWith(oneGroup(), "g1", "right", "x", "g2");
+    d = activate(d, "b");
+    const info: Record<string, { sessionId: string | null; name?: string }> = {
+      a: { sessionId: "s-a" },
+      b: { sessionId: "s-b", name: "로그" },
+      c: { sessionId: null },
+      x: { sessionId: "s-gone" },
+    };
+    const saved = saveWorkspace(d, (id) => info[id])!;
+    expect(savedTabCount(saved)).toBe(4);
+    expect(JSON.parse(JSON.stringify(saved))).toEqual(saved);
+
+    let n = 0;
+    const { desk, opened } = restoreWorkspace(saved, (id) => id !== "s-gone", () => `p${++n}`);
+    // s-gone만 있던 g2는 사라진다
+    expect(groupOrder(desk)).toEqual(["g1"]);
+    expect(opened.map(([, t]) => t.sessionId)).toEqual(["s-a", "s-b", null]);
+    expect(opened[1][1].name).toBe("로그");
+    // 보이던 탭(b = 두 번째)이 다시 보인다
+    expect(desk.groups.g1.active).toBe(opened[1][0]);
+  });
+
+  it("restores nothing when every session is gone", () => {
+    const saved = saveWorkspace(addTab(emptyDesk, "a", "g1"), () => ({ sessionId: "gone" }))!;
+    expect(restoreWorkspace(saved, () => false, () => "p").desk).toEqual(emptyDesk);
   });
 });

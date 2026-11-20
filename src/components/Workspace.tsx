@@ -17,7 +17,12 @@ export interface PaneInfo {
   color?: SessionColor | null;
   /** SSH 창이면 true (파일 창을 열 수 있다) */
   ssh?: boolean;
+  /** 사용자가 바꾼 탭 이름(없으면 세션 이름) */
+  customTitle?: string;
 }
+
+/** 탭에 보일 이름 */
+export const tabTitle = (p: PaneInfo | undefined) => p?.customTitle || p?.title || "터미널";
 
 interface Props {
   desk: Desk;
@@ -46,6 +51,11 @@ interface Props {
   sftpPanes: Set<string>;
   onToggleSftp: (paneId: string) => void;
   onToggleBroadcast: () => void;
+  /** 이름을 고치는 중인 탭 */
+  renamingTab: string | null;
+  onRenameStart: (paneId: string) => void;
+  /** null이면 고치기 취소, 빈 문자열이면 원래 이름으로 */
+  onRename: (paneId: string, name: string | null) => void;
 }
 
 function latencyClass(ms: number) {
@@ -109,7 +119,7 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
     .join(" ");
 
   return (
-    <section className={cls} data-group-id={g.id} aria-label={`${info?.title ?? "터미널"} 칸`} onMouseDown={() => props.onActivateGroup(g.id)}>
+    <section className={cls} data-group-id={g.id} aria-label={`${tabTitle(info)} 칸`} onMouseDown={() => props.onActivateGroup(g.id)}>
       <div className="group-bar" data-group-bar={g.id}>
         <div className="group-tabs" role="tablist" aria-label="이 칸의 탭">
           {g.tabs.map((t, i) => {
@@ -131,10 +141,14 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
                 key={t}
                 data-tab-pane={t}
                 className={tcls}
-                title={p?.sub}
+                title={p?.customTitle ? `${p.title} · ${p.sub}` : p?.sub}
                 onMouseDown={(e) => {
-                  if ((e.target as HTMLElement).closest(".close")) return;
+                  if ((e.target as HTMLElement).closest(".close, input")) return;
                   props.onTabDragStart(e, t);
+                }}
+                onDoubleClick={(e) => {
+                  if ((e.target as HTMLElement).closest(".close")) return;
+                  props.onRenameStart(t);
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -149,11 +163,31 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
                   }
                 }}
               >
-                <button role="tab" aria-selected={t === g.active} className="gtab-label" onClick={() => props.onActivateTab(t)}>
-                  <StatusDot status={st} />
-                  <span className="t">{p?.title ?? "터미널"}</span>
-                </button>
-                <button className="close" aria-label={`${p?.title ?? "탭"} 닫기`} title="탭 닫기" onClick={() => props.onCloseTab(t)}>
+                {props.renamingTab === t ? (
+                  <span className="gtab-label">
+                    <StatusDot status={st} />
+                    <input
+                      className="gtab-rename"
+                      aria-label="탭 이름"
+                      autoFocus
+                      defaultValue={tabTitle(p)}
+                      placeholder={p?.title}
+                      onFocus={(e) => e.currentTarget.select()}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") props.onRename(t, e.currentTarget.value);
+                        if (e.key === "Escape") props.onRename(t, null);
+                      }}
+                      onBlur={(e) => props.onRename(t, e.currentTarget.value)}
+                    />
+                  </span>
+                ) : (
+                  <button role="tab" aria-selected={t === g.active} className="gtab-label" onClick={() => props.onActivateTab(t)}>
+                    <StatusDot status={st} />
+                    <span className="t">{tabTitle(p)}</span>
+                  </button>
+                )}
+                <button className="close" aria-label={`${tabTitle(p)} 닫기`} title="탭 닫기" onClick={() => props.onCloseTab(t)}>
                   <IconClose width={11} height={11} />
                 </button>
               </div>

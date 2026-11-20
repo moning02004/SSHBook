@@ -163,3 +163,116 @@ export function toggleZoom(d: Desk, groupId: string): Desk {
   if (groupOrder(d).length < 2) return d;
   return { ...d, zoomed: d.zoomed === groupId ? null : groupId, activeGroup: groupId };
 }
+
+// ---- 키보드로 칸 이동 ----
+
+export type Dir = "left" | "right" | "up" | "down";
+export interface Rect {
+  id: string;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * from 칸에서 dir 쪽으로 가장 가까운 칸. 그쪽으로 겹치는(가로 이동이면 세로로 겹치는) 칸을 먼저 고르고,
+ * 같으면 중심이 가까운 칸. 없으면 null.
+ */
+export function neighborGroup(rects: Rect[], fromId: string, dir: Dir): string | null {
+  const from = rects.find((r) => r.id === fromId);
+  if (!from) return null;
+  const cx = (r: Rect) => (r.left + r.right) / 2;
+  const cy = (r: Rect) => (r.top + r.bottom) / 2;
+  const ahead = (r: Rect) =>
+    dir === "left" ? r.right <= from.left + 1 : dir === "right" ? r.left >= from.right - 1 : dir === "up" ? r.bottom <= from.top + 1 : r.top >= from.bottom - 1;
+  const overlap = (r: Rect) =>
+    dir === "left" || dir === "right"
+      ? Math.min(r.bottom, from.bottom) - Math.max(r.top, from.top)
+      : Math.min(r.right, from.right) - Math.max(r.left, from.left);
+  const candidates = rects.filter((r) => r.id !== fromId && ahead(r));
+  if (!candidates.length) return null;
+  const dist = (r: Rect) => Math.hypot(cx(r) - cx(from), cy(r) - cy(from));
+  candidates.sort((a, b) => {
+    const oa = overlap(a) > 0 ? 1 : 0;
+    const ob = overlap(b) > 0 ? 1 : 0;
+    return ob - oa || dist(a) - dist(b);
+  });
+  return candidates[0].id;
+}
+
+/** 지금 칸의 다음/이전 탭(끝에서 처음으로 돈다) */
+export function cycleTab(d: Desk, step: 1 | -1): Desk {
+  const g = d.activeGroup ? d.groups[d.activeGroup] : null;
+  if (!g || g.tabs.length < 2) return d;
+  const i = g.tabs.indexOf(g.active);
+  return activate(d, g.tabs[(i + step + g.tabs.length) % g.tabs.length]);
+}
+
+/** 지금 칸의 n번째 탭(1부터). 9는 늘 마지막 탭 */
+export function nthTab(d: Desk, n: number): Desk {
+  const g = d.activeGroup ? d.groups[d.activeGroup] : null;
+  if (!g) return d;
+  const t = n >= 9 ? g.tabs[g.tabs.length - 1] : g.tabs[n - 1];
+  return t ? activate(d, t) : d;
+}
+
+// ---- 작업 공간 저장·복원 ----
+// 비밀 정보 없이 배치와 세션 id만 저장한다. 터미널 id는 다시 열 때 새로 만든다.
+
+export interface SavedTab {
+  /** 저장된 세션 id. null이면 로컬 셸 */
+  sessionId: string | null;
+  /** 사용자가 바꾼 탭 이름 */
+  name?: string;
+}
+export interface SavedWorkspace {
+  v: 1;
+  root: LayoutNode;
+  groups: Record<string, { tabs: SavedTab[]; active: number }>;
+  activeGroup: string | null;
+}
+
+export function saveWorkspace(d: Desk, tabInfo: (paneId: string) => SavedTab | null): SavedWorkspace | null {
+  if (!d.root) return null;
+  const groups: SavedWorkspace["groups"] = {};
+  for (const id of groupOrder(d)) {
+    const g = d.groups[id];
+    const tabs = g.tabs.map(tabInfo).filter((t): t is SavedTab => !!t);
+    groups[id] = { tabs, active: Math.max(0, g.tabs.indexOf(g.active)) };
+  }
+  return { v: 1, root: d.root, groups, activeGroup: d.activeGroup };
+}
+
+/** 저장된 탭 수 */
+export const savedTabCount = (w: SavedWorkspace): number => Object.values(w.groups).reduce((n, g) => n + g.tabs.length, 0);
+
+/**
+ * 저장해 둔 배치로 작업 공간을 다시 만든다. 지워진 세션의 탭은 빼고, 빈 칸은 없앤다.
+ * 돌려준 opened는 새 터미널 id → 그 탭 정보(다시 연결할 세션).
+ */
+export function restoreWorkspace(
+  w: SavedWorkspace,
+  sessionExists: (id: string) => boolean,
+  newId: () => string,
+): { desk: Desk; opened: [string, SavedTab][] } {
+  let root: LayoutNode | null = w.root;
+  const groups: Record<string, Group> = {};
+  const opened: [string, SavedTab][] = [];
+  for (const gid of paneIds(w.root)) {
+    const sg = w.groups[gid];
+    const kept = (sg?.tabs ?? []).filter((t) => t.sessionId === null || sessionExists(t.sessionId));
+    if (!kept.length) {
+      root = root ? closePane(root, gid) : null;
+      continue;
+    }
+    const ids = kept.map(() => newId());
+    kept.forEach((t, i) => opened.push([ids[i], t]));
+    const active = ids[Math.min(sg.active, ids.length - 1)] ?? ids[0];
+    groups[gid] = { id: gid, tabs: ids, active };
+  }
+  if (!root || !Object.keys(groups).length) return { desk: emptyDesk, opened: [] };
+  const order = paneIds(root);
+  const activeGroup = w.activeGroup && groups[w.activeGroup] ? w.activeGroup : order[0];
+  return { desk: { root, groups, activeGroup, zoomed: null, broadcast: false }, opened };
+}

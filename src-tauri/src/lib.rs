@@ -299,6 +299,28 @@ fn session_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     v.save().map_err(|e| e.to_string())
 }
 
+/// 그룹 이름을 바꾼다(그 그룹의 세션 모두). to가 비면 그룹을 없앤다(그룹 없음으로).
+#[tauri::command]
+fn sessions_rename_group(state: State<'_, AppState>, from: String, to: String) -> CmdResult<usize> {
+    let to = to.trim().to_string();
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let mut n = 0;
+    for s in v
+        .data
+        .sessions
+        .iter_mut()
+        .filter(|s| s.group.as_deref() == Some(from.as_str()))
+    {
+        s.group = (!to.is_empty()).then(|| to.clone());
+        n += 1;
+    }
+    if n > 0 {
+        v.save().map_err(|e| e.to_string())?;
+    }
+    Ok(n)
+}
+
 /// 같은 설정(저장된 비밀번호·키 포함)으로 새 세션을 만든다. 이름 뒤에 "복사"를 붙인다.
 #[tauri::command]
 fn session_duplicate(state: State<'_, AppState>, id: String) -> CmdResult<Session> {
@@ -802,6 +824,7 @@ pub fn run() {
             session_save,
             session_delete,
             session_duplicate,
+            sessions_rename_group,
             snippets_list,
             snippet_save,
             snippet_delete,
