@@ -26,6 +26,13 @@ export async function pickSavePath(defaultName: string): Promise<string | null> 
   return save({ title: "내려받기", defaultPath: defaultName });
 }
 
+/** 폴더 하나 고르기(폴더 내려받기 대상, 폴더 올리기) */
+export async function pickFolder(title: string): Promise<string | null> {
+  if (!inTauri) return window.prompt(title, "~/Downloads");
+  const r = await open({ title, multiple: false, directory: true });
+  return typeof r === "string" ? r : null;
+}
+
 /** 올릴 파일들 */
 export async function pickUploadFiles(): Promise<string[]> {
   if (!inTauri) {

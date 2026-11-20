@@ -143,7 +143,12 @@ async fn it_sftp_round_trip() {
     let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(&src, &body).unwrap();
 
-    let remote = sftp::upload(conn, &src, &dir).await.unwrap();
+    let q = sftp::Transfer::quiet();
+    assert_eq!(
+        sftp::upload(conn, std::slice::from_ref(&src), &dir, &q).await.unwrap(),
+        1
+    );
+    let remote = format!("{dir}/hello.txt");
     let listing = sftp::list(conn, &dir).await.unwrap();
     assert!(listing
         .entries
@@ -151,7 +156,10 @@ async fn it_sftp_round_trip() {
         .any(|e| e.name == "hello.txt" && e.size == body.len() as u64));
 
     let back = local_dir.join("back.txt");
-    assert_eq!(sftp::download(conn, &remote, &back).await.unwrap(), body.len() as u64);
+    assert_eq!(
+        sftp::download(conn, &remote, &back, false, &q).await.unwrap(),
+        body.len() as u64
+    );
     assert_eq!(std::fs::read(&back).unwrap(), body);
 
     let renamed = format!("{dir}/renamed.txt");
@@ -270,4 +278,69 @@ async fn it_jump_host_to_inner_address() {
     .await;
     term.write("echo via-jump-$((2*21))\r").unwrap();
     read_until(&mut rx, "via-jump-42").await;
+}
+
+#[tokio::test]
+#[ignore = "OpenSSH 테스트 서버가 필요합니다"]
+async fn it_sftp_folder_round_trip_with_progress_and_cancel() {
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+    let (term, _rx) = open(plain(trusted().await)).await;
+    let conn = &term.conn;
+    let base = std::env::temp_dir().join(format!("sshbook-it-{}", uuid::Uuid::new_v4()));
+    let proj = base.join("proj");
+    std::fs::create_dir_all(proj.join("sub/deep")).unwrap();
+    std::fs::write(proj.join("a.txt"), vec![b'a'; 200_000]).unwrap();
+    std::fs::write(proj.join("sub/deep/b.txt"), b"deep").unwrap();
+
+    let remote_dir = format!("/tmp/it-{}", uuid::Uuid::new_v4());
+    sftp::mkdir(conn, &remote_dir).await.unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::<sftp::Progress>::new()));
+    let s2 = seen.clone();
+    let t = sftp::Transfer {
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        on_progress: Box::new(move |p| s2.lock().unwrap().push(p.clone())),
+    };
+    assert_eq!(
+        sftp::upload(conn, std::slice::from_ref(&proj), &remote_dir, &t)
+            .await
+            .unwrap(),
+        2
+    );
+    let last = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        (last.done, last.total, last.files_done, last.files_total),
+        (200_004, 200_004, 2, 2)
+    );
+
+    // 폴더째 내려받기
+    let down = base.join("down");
+    std::fs::create_dir_all(&down).unwrap();
+    let n = sftp::download(
+        conn,
+        &format!("{remote_dir}/proj"),
+        &down,
+        true,
+        &sftp::Transfer::quiet(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, 200_004);
+    assert_eq!(std::fs::read(down.join("proj/sub/deep/b.txt")).unwrap(), b"deep");
+
+    // 취소: 시작하자마자 취소 표시 → 오류, 쓰다 만 파일은 남지 않는다
+    let c = sftp::Transfer::quiet();
+    c.cancel.store(true, Ordering::Relaxed);
+    let err = sftp::download(
+        conn,
+        &format!("{remote_dir}/proj/a.txt"),
+        &base.join("x.txt"),
+        false,
+        &c,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, sftp::CANCELLED);
+    assert!(!base.join("x.txt").exists() && !base.join("x.sshbook-part").exists());
 }

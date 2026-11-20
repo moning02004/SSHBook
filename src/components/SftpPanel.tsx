@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { api, errorText, inTauri, type RemoteEntry } from "../lib/api";
-import { pickSavePath, pickUploadFiles } from "../lib/dialogs";
+import { api, errorText, inTauri, TRANSFER_CANCELLED, type RemoteEntry, type SftpProgress } from "../lib/api";
+import { pickFolder, pickSavePath, pickUploadFiles } from "../lib/dialogs";
 import * as terms from "../lib/terminals";
 import { IconClose, IconDownload, IconEdit, IconFile, IconFolder, IconFolderPlus, IconRefresh, IconTarget, IconTrash, IconUp, IconUpload } from "./Icons";
 
@@ -42,7 +42,36 @@ export function SftpPanel({ paneId, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
   const [dropping, setDropping] = useState(false);
+  /** 진행 중인 전송(한 번에 하나) */
+  const [transfer, setTransfer] = useState<{ id: string; label: string; p: SftpProgress | null } | null>(null);
+  const [uploadMenu, setUploadMenu] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
+
+  // 진행률 이벤트는 지금 전송 것만 받는다.
+  const transferId = useRef<string | null>(null);
+  useEffect(() => {
+    const un = api.onSftpProgress((p) => {
+      if (p.transferId === transferId.current) setTransfer((t) => (t ? { ...t, p } : t));
+    });
+    return () => void un.then((f) => f());
+  }, []);
+
+  /** 전송 하나를 돌린다: 진행률을 보여 주고, 끝나면 결과 문구를, 취소하면 그렇게 알린다. */
+  const runTransfer = async (label: string, fn: (id: string) => Promise<string>) => {
+    const id = crypto.randomUUID();
+    transferId.current = id;
+    setTransfer({ id, label, p: null });
+    setMessage(null);
+    try {
+      setMessage({ text: await fn(id) });
+    } catch (e) {
+      const text = errorText(e);
+      setMessage({ text, error: text !== TRANSFER_CANCELLED });
+    } finally {
+      transferId.current = null;
+      setTransfer(null);
+    }
+  };
 
   const load = useCallback(
     async (target: string) => {
@@ -93,30 +122,29 @@ export function SftpPanel({ paneId, onClose }: Props) {
     }
   };
 
-  const upload = async (files: string[]) => {
-    if (!termId || files.length === 0) return;
-    await act(`${files.length}개 올리는 중`, async () => {
-      const failed: string[] = [];
-      for (const f of files) {
-        try {
-          await api.sftpUpload(termId, f, path);
-        } catch (e) {
-          failed.push(`${baseName(f)}: ${errorText(e)}`);
-        }
+  /** 파일·폴더를 지금 폴더로 올린다(폴더는 안의 것까지 모두). */
+  const upload = async (locals: string[]) => {
+    if (!termId || locals.length === 0 || transfer) return;
+    const label = locals.length === 1 ? `${baseName(locals[0])} 올리는 중` : `${locals.length}개 올리는 중`;
+    const dir = path;
+    await runTransfer(label, async (id) => {
+      try {
+        const n = await api.sftpUpload(termId, locals, dir, id);
+        return `파일 ${n}개를 올렸습니다.`;
+      } finally {
+        await load(dir);
       }
-      await load(path);
-      if (failed.length) throw failed.join("\n");
-      return `${files.length}개를 올렸습니다.`;
     });
   };
 
+  /** 파일은 저장할 곳을, 폴더는 내려받을 폴더를 골라 내려받는다. */
   const download = async (e: RemoteEntry) => {
-    if (!termId) return;
-    const dest = await pickSavePath(e.name);
+    if (!termId || transfer) return;
+    const dest = e.isDir ? await pickFolder(`'${e.name}' 폴더를 내려받을 곳`) : await pickSavePath(e.name);
     if (!dest) return;
-    await act(`${e.name} 내려받는 중`, async () => {
-      const n = await api.sftpDownload(termId, joinPath(path, e.name), dest);
-      return `내려받았습니다 (${humanSize(n)}): ${dest}`;
+    await runTransfer(`${e.name} 내려받는 중`, async (id) => {
+      const n = await api.sftpDownload(termId, joinPath(path, e.name), dest, e.isDir, id);
+      return `내려받았습니다 (${humanSize(n)}): ${e.isDir ? `${dest}/${e.name}` : dest}`;
     });
   };
 
@@ -196,9 +224,28 @@ export function SftpPanel({ paneId, onClose }: Props) {
         <button className="icon-btn ghost sm" title="새 폴더" aria-label="새 폴더" disabled={!termId || busy} onClick={() => void mkdir()}>
           <IconFolderPlus width={14} height={14} />
         </button>
-        <button className="icon-btn ghost sm" title="올리기 (끌어다 놓아도 됩니다)" aria-label="올리기" disabled={!termId || busy} onClick={async () => upload(await pickUploadFiles())}>
-          <IconUpload width={14} height={14} />
-        </button>
+        <span className="upload-wrap">
+          <button
+            className="icon-btn ghost sm"
+            title="올리기 (파일·폴더를 끌어다 놓아도 됩니다)"
+            aria-label="올리기"
+            aria-expanded={uploadMenu}
+            disabled={!termId || busy || !!transfer}
+            onClick={() => setUploadMenu((v) => !v)}
+          >
+            <IconUpload width={14} height={14} />
+          </button>
+          {uploadMenu && (
+            <span className="upload-menu" role="menu" onMouseLeave={() => setUploadMenu(false)}>
+              <button role="menuitem" onClick={async () => { setUploadMenu(false); void upload(await pickUploadFiles()); }}>
+                파일 올리기…
+              </button>
+              <button role="menuitem" onClick={async () => { setUploadMenu(false); const f = await pickFolder("올릴 폴더"); if (f) void upload([f]); }}>
+                폴더 올리기…
+              </button>
+            </span>
+          )}
+        </span>
         <button className="icon-btn ghost sm" title="새로 고침" aria-label="새로 고침" disabled={!termId || busy} onClick={() => void load(path)}>
           <IconRefresh width={14} height={14} />
         </button>
@@ -242,8 +289,8 @@ export function SftpPanel({ paneId, onClose }: Props) {
                 <span className="nm">{e.name}{e.isLink ? " →" : ""}</span>
                 <span className="meta">{e.isDir ? when(e.mtime) : humanSize(e.size)}</span>
                 <span className="row-actions">
-                  {!e.isDir && (
-                    <button className="icon-btn ghost xs" title="내려받기" aria-label={`${e.name} 내려받기`} onClick={(ev) => { ev.stopPropagation(); void download(e); }}>
+                  {!e.isLink && (
+                    <button className="icon-btn ghost xs" title={e.isDir ? "폴더째 내려받기" : "내려받기"} aria-label={`${e.name} 내려받기`} disabled={!!transfer} onClick={(ev) => { ev.stopPropagation(); void download(e); }}>
                       <IconDownload width={12} height={12} />
                     </button>
                   )}
@@ -260,6 +307,28 @@ export function SftpPanel({ paneId, onClose }: Props) {
         </>
       )}
 
+      {transfer && (
+        <div className="sftp-transfer" role="status" aria-live="polite">
+          <div className="row">
+            <span className="label">{transfer.label}</span>
+            <button className="btn subtle sm" onClick={() => void api.sftpCancel(transfer.id)}>
+              취소
+            </button>
+          </div>
+          <div className="progress" aria-hidden>
+            <span
+              className={transfer.p && transfer.p.total > 0 ? "" : "indeterminate"}
+              style={{ width: transfer.p && transfer.p.total > 0 ? `${Math.round((transfer.p.done / transfer.p.total) * 100)}%` : "30%" }}
+            />
+          </div>
+          {transfer.p && (
+            <div className="detail">
+              {humanSize(transfer.p.done)} / {humanSize(transfer.p.total)} · 파일 {transfer.p.filesDone}/{transfer.p.filesTotal}
+              {transfer.p.file && <span className="file"> · {transfer.p.file}</span>}
+            </div>
+          )}
+        </div>
+      )}
       {(message || dropping) && (
         <div className={`sftp-msg${message?.error ? " error" : ""}`} role="status">
           {dropping ? `여기에 놓으면 ${path || "지금 폴더"}로 올립니다` : message?.text}

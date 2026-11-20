@@ -43,6 +43,20 @@ export interface VaultBackup {
   size: number;
 }
 
+/** 파일 전송 진행률 */
+export interface SftpProgress {
+  transferId: string;
+  done: number;
+  total: number;
+  /** 지금 옮기는 파일(상대 경로) */
+  file: string;
+  filesDone: number;
+  filesTotal: number;
+}
+
+/** 취소했을 때의 오류 문구(백엔드 sftp::CANCELLED와 같다) */
+export const TRANSFER_CANCELLED = "전송을 취소했습니다.";
+
 export interface TermLatency {
   id: string;
   ms: number;
@@ -129,8 +143,12 @@ export interface Backend {
   sftpList(termId: string, path: string): Promise<RemoteListing>;
   /** 터미널 셸이 지금 있는 폴더. 알 수 없으면 null */
   sftpCwd(termId: string): Promise<string | null>;
-  sftpDownload(termId: string, remote: string, local: string): Promise<number>;
-  sftpUpload(termId: string, local: string, remoteDir: string): Promise<string>;
+  /** 파일이면 local = 저장할 파일, 폴더면 local 폴더 안에 같은 이름으로. 옮긴 바이트 수 */
+  sftpDownload(termId: string, remote: string, local: string, isDir: boolean, transferId: string): Promise<number>;
+  /** 파일·폴더들을 원격 폴더로. 올린 파일 수 */
+  sftpUpload(termId: string, locals: string[], remoteDir: string, transferId: string): Promise<number>;
+  sftpCancel(transferId: string): Promise<void>;
+  onSftpProgress(cb: (e: SftpProgress) => void): Promise<() => void>;
   sftpMkdir(termId: string, path: string): Promise<void>;
   sftpRemove(termId: string, path: string, isDir: boolean): Promise<void>;
   sftpRename(termId: string, from: string, to: string): Promise<void>;
@@ -172,8 +190,10 @@ const tauriBackend: Backend = {
   openLogsDir: () => invoke("open_logs_dir"),
   sftpList: (id, path) => invoke("sftp_list", { id, path }),
   sftpCwd: (id) => invoke("sftp_cwd", { id }),
-  sftpDownload: (id, remote, local) => invoke("sftp_download", { id, remote, local }),
-  sftpUpload: (id, local, remoteDir) => invoke("sftp_upload", { id, local, remoteDir }),
+  sftpDownload: (id, remote, local, isDir, transferId) => invoke("sftp_download", { id, remote, local, isDir, transferId }),
+  sftpUpload: (id, locals, remoteDir, transferId) => invoke("sftp_upload", { id, locals, remoteDir, transferId }),
+  sftpCancel: (transferId) => invoke("sftp_cancel", { transferId }),
+  onSftpProgress: (cb) => listen<SftpProgress>("sftp-progress", (e) => cb(e.payload)),
   sftpMkdir: (id, path) => invoke("sftp_mkdir", { id, path }),
   sftpRemove: (id, path, isDir) => invoke("sftp_remove", { id, path, isDir }),
   sftpRename: (id, from, to) => invoke("sftp_rename", { id, from, to }),
@@ -201,6 +221,18 @@ function createMockBackend(): Backend {
     { id: "s2", name: "디스크 사용량", command: "df -h" },
   ];
   const latencySubs = new Set<(e: TermLatency) => void>();
+  const progressSubs = new Set<(e: SftpProgress) => void>();
+  const cancelled = new Set<string>();
+  /** 미리보기: 2초 동안 진행률을 흉내 낸다 */
+  const fakeTransfer = async (transferId: string, total: number, files: number) => {
+    for (let i = 0; i <= 20; i++) {
+      if (cancelled.has(transferId)) throw TRANSFER_CANCELLED;
+      const done = Math.round((total * i) / 20);
+      const filesDone = Math.min(files, Math.floor((files * i) / 20));
+      progressSubs.forEach((cb) => cb({ transferId, done, total, file: `file-${filesDone + 1}.log`, filesDone, filesTotal: files }));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
   const remoteTree: Record<string, RemoteEntry[]> = {
     "/home/dev": [
       { name: "app", isDir: true, isLink: false, size: 0, mtime: 1763600000 },
@@ -335,14 +367,24 @@ function createMockBackend(): Backend {
     async sftpCwd() {
       return "/home/dev/app";
     },
-    async sftpDownload() {
-      await wait();
-      return 1024;
+    async sftpDownload(_id, _remote, _local, _isDir, transferId) {
+      await fakeTransfer(transferId, 5_242_880, 3);
+      return 5_242_880;
     },
-    async sftpUpload(_id, local, dir) {
-      const name = local.split(/[\\/]/).pop() ?? "file";
-      (remoteTree[norm(dir)] ??= []).push({ name, isDir: false, isLink: false, size: 100, mtime: Date.now() / 1000 });
-      return `${dir}/${name}`;
+    async sftpUpload(_id, locals, dir, transferId) {
+      await fakeTransfer(transferId, 1_048_576 * locals.length, locals.length);
+      for (const local of locals) {
+        const name = local.split(/[\\/]/).pop() ?? "file";
+        (remoteTree[norm(dir)] ??= []).push({ name, isDir: false, isLink: false, size: 100, mtime: Date.now() / 1000 });
+      }
+      return locals.length;
+    },
+    async sftpCancel(transferId) {
+      cancelled.add(transferId);
+    },
+    async onSftpProgress(cb) {
+      progressSubs.add(cb);
+      return () => progressSubs.delete(cb);
     },
     async sftpMkdir(_id, path) {
       const abs = norm(path);

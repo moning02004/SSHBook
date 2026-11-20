@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use vault::{KdfParams, OpenVault, Secret, Session, SessionKind, Snippet};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -41,6 +41,8 @@ struct AppState {
     terms: Mutex<HashMap<String, Term>>,
     /// 사용자 확인을 기다리는 호스트 키 ("host:port" → 공개 키)
     pending_hosts: Mutex<HashMap<String, String>>,
+    /// 진행 중인 파일 전송의 취소 표시 (전송 id → 표시)
+    transfers: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -687,18 +689,83 @@ async fn sftp_cwd(state: State<'_, AppState>, id: String) -> CmdResult<Option<St
     sftp::terminal_cwd(&c).await
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TransferEvent {
+    transfer_id: String,
+    #[serde(flatten)]
+    progress: sftp::Progress,
+}
+
+/// 전송 하나를 등록한다: 취소 표시를 남기고, 진행률은 `sftp-progress` 이벤트로 보낸다.
+fn start_transfer(app: &AppHandle, state: &AppState, transfer_id: &str) -> sftp::Transfer {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    lock(&state.transfers).insert(transfer_id.to_string(), cancel.clone());
+    let app = app.clone();
+    let tid = transfer_id.to_string();
+    sftp::Transfer {
+        cancel,
+        on_progress: Box::new(move |p| {
+            let _ = app.emit(
+                "sftp-progress",
+                TransferEvent {
+                    transfer_id: tid.clone(),
+                    progress: p.clone(),
+                },
+            );
+        }),
+    }
+}
+
+/// 내려받기. 파일이면 local = 저장할 파일, 폴더면 local 폴더 안에 같은 이름으로 만든다.
 #[tauri::command]
-async fn sftp_download(state: State<'_, AppState>, id: String, remote: String, local: String) -> CmdResult<u64> {
+#[allow(clippy::too_many_arguments)]
+async fn sftp_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    remote: String,
+    local: String,
+    is_dir: bool,
+    transfer_id: String,
+) -> CmdResult<u64> {
     let c = conn_of(&state, &id)?;
-    let r = sftp::download(&c, &remote, &PathBuf::from(local)).await;
+    let t = start_transfer(&app, &state, &transfer_id);
+    let r = sftp::download(&c, &remote, &PathBuf::from(local), is_dir, &t).await;
+    lock(&state.transfers).remove(&transfer_id);
+    if matches!(&r, Err(e) if e == sftp::CANCELLED) {
+        return r;
+    }
     sftp_call(&c, r).await
 }
 
+/// 파일·폴더들을 원격 폴더로 올린다. 올린 파일 수를 돌려준다.
 #[tauri::command]
-async fn sftp_upload(state: State<'_, AppState>, id: String, local: String, remote_dir: String) -> CmdResult<String> {
+async fn sftp_upload(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    locals: Vec<String>,
+    remote_dir: String,
+    transfer_id: String,
+) -> CmdResult<u32> {
     let c = conn_of(&state, &id)?;
-    let r = sftp::upload(&c, &PathBuf::from(local), &remote_dir).await;
+    let t = start_transfer(&app, &state, &transfer_id);
+    let paths: Vec<PathBuf> = locals.into_iter().map(PathBuf::from).collect();
+    let r = sftp::upload(&c, &paths, &remote_dir, &t).await;
+    lock(&state.transfers).remove(&transfer_id);
+    if matches!(&r, Err(e) if e == sftp::CANCELLED) {
+        return r;
+    }
     sftp_call(&c, r).await
+}
+
+/// 진행 중인 전송을 멈춘다(쓰다 만 파일은 지운다).
+#[tauri::command]
+fn sftp_cancel(state: State<'_, AppState>, transfer_id: String) {
+    if let Some(flag) = lock(&state.transfers).get(&transfer_id) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[tauri::command]
@@ -836,6 +903,7 @@ pub fn run() {
             sftp_cwd,
             sftp_download,
             sftp_upload,
+            sftp_cancel,
             sftp_mkdir,
             sftp_remove,
             sftp_rename,

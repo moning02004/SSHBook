@@ -5,9 +5,10 @@ use crate::ssh::Conn;
 use russh::ChannelMsg;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Serialize)]
@@ -140,73 +141,302 @@ pub fn join(dir: &str, name: &str) -> String {
 }
 
 const CHUNK: usize = 256 * 1024;
+const STALL: Duration = Duration::from_secs(60);
 
-pub async fn download(conn: &Conn, remote: &str, local: &Path) -> Result<u64, String> {
-    let s = session(conn).await?;
+/// 전송 진행률(화면에 보낸다)
+#[derive(Serialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Progress {
+    pub done: u64,
+    pub total: u64,
+    /// 지금 옮기는 파일(상대 경로)
+    pub file: String,
+    pub files_done: u32,
+    pub files_total: u32,
+}
+
+/// 전송 한 번: 취소 표시와 진행률 콜백
+pub struct Transfer {
+    pub cancel: Arc<AtomicBool>,
+    pub on_progress: Box<dyn Fn(&Progress) + Send + Sync>,
+}
+
+impl Transfer {
+    /// 진행률을 받지 않는 전송(테스트용)
+    #[cfg(test)]
+    pub fn quiet() -> Self {
+        Transfer {
+            cancel: Arc::new(AtomicBool::new(false)),
+            on_progress: Box::new(|_| {}),
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub const CANCELLED: &str = "전송을 취소했습니다.";
+
+/// 진행률을 모아 0.1초에 한 번쯤 보낸다.
+struct Meter<'a> {
+    t: &'a Transfer,
+    p: Progress,
+    last: Instant,
+}
+
+impl<'a> Meter<'a> {
+    fn new(t: &'a Transfer, total: u64, files_total: u32) -> Self {
+        let m = Meter {
+            t,
+            p: Progress {
+                total,
+                files_total,
+                ..Default::default()
+            },
+            last: Instant::now(),
+        };
+        (m.t.on_progress)(&m.p);
+        m
+    }
+    fn file(&mut self, name: &str) {
+        self.p.file = name.into();
+        self.flush();
+    }
+    fn add(&mut self, n: u64) {
+        self.p.done += n;
+        if self.last.elapsed() >= Duration::from_millis(100) {
+            self.flush();
+        }
+    }
+    fn file_done(&mut self) {
+        self.p.files_done += 1;
+        self.flush();
+    }
+    fn flush(&mut self) {
+        self.last = Instant::now();
+        (self.t.on_progress)(&self.p);
+    }
+}
+
+fn base_name(remote: &str) -> String {
+    remote
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("download")
+        .to_string()
+}
+
+/// (원격 경로, 내 PC 경로, 크기)
+type DownPlan = (Vec<(String, PathBuf, u64)>, Vec<PathBuf>);
+/// (내 PC 경로, 원격 경로, 크기)와 만들 원격 폴더
+type UpPlan = (Vec<(PathBuf, String, u64)>, Vec<String>);
+
+/// 원격 폴더 안의 파일(원격 경로, 내 PC 경로, 크기)과 만들 폴더들. 심볼릭 링크는 건너뛴다(순환 방지).
+async fn walk_remote(s: &SftpSession, root_remote: &str, root_local: &Path, t: &Transfer) -> Result<DownPlan, String> {
+    let mut files = vec![];
+    let mut dirs = vec![root_local.to_path_buf()];
+    let mut stack = vec![(root_remote.to_string(), root_local.to_path_buf())];
+    while let Some((rdir, ldir)) = stack.pop() {
+        t.check()?;
+        let rd = s
+            .read_dir(rdir.clone())
+            .await
+            .map_err(|e| e2s(&format!("폴더를 읽지 못했습니다 ({rdir})"), e))?;
+        for d in rd {
+            let name = d.file_name();
+            if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+                continue;
+            }
+            let m = d.metadata();
+            if m.is_symlink() {
+                continue;
+            }
+            let r = join(&rdir, &name);
+            let l = ldir.join(&name);
+            if m.is_dir() {
+                dirs.push(l.clone());
+                stack.push((r, l));
+            } else {
+                files.push((r, l, m.size.unwrap_or(0)));
+            }
+        }
+    }
+    Ok((files, dirs))
+}
+
+async fn copy_down(s: &SftpSession, remote: &str, local: &Path, m: &mut Meter<'_>) -> Result<(), String> {
     let mut src = s
         .open(remote)
         .await
-        .map_err(|e| e2s("원격 파일을 열지 못했습니다", e))?;
+        .map_err(|e| e2s(&format!("원격 파일을 열지 못했습니다 ({remote})"), e))?;
     let tmp = local.with_extension("sshbook-part");
     let mut dst = tokio::fs::File::create(&tmp)
         .await
         .map_err(|e| e2s("내 PC에 파일을 만들지 못했습니다", e))?;
     let mut buf = vec![0u8; CHUNK];
-    let mut total = 0u64;
-    loop {
-        let n = tokio::time::timeout(Duration::from_secs(60), src.read(&mut buf))
-            .await
-            .map_err(|_| "내려받는 중 응답이 없습니다.".to_string())?
-            .map_err(|e| e2s("내려받다가 실패했습니다", e))?;
-        if n == 0 {
-            break;
+    let result: Result<(), String> = async {
+        loop {
+            m.t.check()?;
+            let n = tokio::time::timeout(STALL, src.read(&mut buf))
+                .await
+                .map_err(|_| "내려받는 중 응답이 없습니다.".to_string())?
+                .map_err(|e| e2s("내려받다가 실패했습니다", e))?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n])
+                .await
+                .map_err(|e| e2s("저장하다가 실패했습니다", e))?;
+            m.add(n as u64);
         }
-        dst.write_all(&buf[..n])
-            .await
-            .map_err(|e| e2s("저장하다가 실패했습니다", e))?;
-        total += n as u64;
+        dst.flush().await.map_err(|e| e2s("저장하다가 실패했습니다", e))
     }
-    dst.flush().await.map_err(|e| e2s("저장하다가 실패했습니다", e))?;
+    .await;
     drop(dst);
+    if let Err(e) = result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     tokio::fs::rename(&tmp, local)
         .await
-        .map_err(|e| e2s("저장하다가 실패했습니다", e))?;
-    Ok(total)
+        .map_err(|e| e2s("저장하다가 실패했습니다", e))
 }
 
-pub async fn upload(conn: &Conn, local: &Path, remote_dir: &str) -> Result<String, String> {
+/// 내려받기. 파일이면 local이 저장할 파일 경로, 폴더면 local 폴더 안에 같은 이름으로 만든다.
+/// 돌려주는 값은 옮긴 바이트 수.
+pub async fn download(conn: &Conn, remote: &str, local: &Path, is_dir: bool, t: &Transfer) -> Result<u64, String> {
     let s = session(conn).await?;
-    let name = local
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .ok_or("파일 이름이 없습니다.")?;
-    let meta = tokio::fs::metadata(local)
-        .await
-        .map_err(|e| e2s("파일을 읽지 못했습니다", e))?;
-    if meta.is_dir() {
-        return Err(format!("'{name}'은 폴더입니다. 지금은 파일만 올릴 수 있습니다."));
+    let (files, dirs) = if is_dir {
+        walk_remote(&s, remote, &local.join(base_name(remote)), t).await?
+    } else {
+        let size = s.metadata(remote).await.ok().and_then(|m| m.size).unwrap_or(0);
+        (vec![(remote.to_string(), local.to_path_buf(), size)], vec![])
+    };
+    for d in &dirs {
+        tokio::fs::create_dir_all(d)
+            .await
+            .map_err(|e| e2s("내 PC에 폴더를 만들지 못했습니다", e))?;
     }
-    let remote = join(remote_dir, &name);
+    let total = files.iter().map(|f| f.2).sum();
+    let mut m = Meter::new(t, total, files.len() as u32);
+    let prefix = local.to_path_buf();
+    for (r, l, _) in &files {
+        let shown = l.strip_prefix(&prefix).unwrap_or(l).display().to_string();
+        m.file(if shown.is_empty() { r } else { &shown });
+        copy_down(&s, r, l, &mut m).await?;
+        m.file_done();
+    }
+    Ok(m.p.done)
+}
+
+/// 내 PC 폴더 안의 파일(내 PC 경로, 원격 경로, 크기)과 만들 원격 폴더들. 심볼릭 링크는 건너뛴다.
+fn walk_local(root: &Path, remote_root: &str) -> Result<UpPlan, String> {
+    let mut files = vec![];
+    let mut dirs = vec![remote_root.to_string()];
+    let mut stack = vec![(root.to_path_buf(), remote_root.to_string())];
+    while let Some((ldir, rdir)) = stack.pop() {
+        let rd =
+            std::fs::read_dir(&ldir).map_err(|e| e2s(&format!("폴더를 읽지 못했습니다 ({})", ldir.display()), e))?;
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let r = join(&rdir, &name);
+            if ft.is_dir() {
+                dirs.push(r.clone());
+                stack.push((entry.path(), r));
+            } else if ft.is_file() {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                files.push((entry.path(), r, size));
+            }
+        }
+    }
+    Ok((files, dirs))
+}
+
+async fn copy_up(s: &SftpSession, local: &Path, remote: &str, m: &mut Meter<'_>) -> Result<(), String> {
     let mut src = tokio::fs::File::open(local)
         .await
         .map_err(|e| e2s("파일을 읽지 못했습니다", e))?;
     let mut dst = s
-        .create(remote.clone())
+        .create(remote.to_string())
         .await
-        .map_err(|e| e2s("원격에 파일을 만들지 못했습니다", e))?;
+        .map_err(|e| e2s(&format!("원격에 파일을 만들지 못했습니다 ({remote})"), e))?;
     let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = src.read(&mut buf).await.map_err(|e| e2s("파일을 읽지 못했습니다", e))?;
-        if n == 0 {
-            break;
+    let result: Result<(), String> = async {
+        loop {
+            m.t.check()?;
+            let n = src.read(&mut buf).await.map_err(|e| e2s("파일을 읽지 못했습니다", e))?;
+            if n == 0 {
+                break;
+            }
+            tokio::time::timeout(STALL, dst.write_all(&buf[..n]))
+                .await
+                .map_err(|_| "올리는 중 응답이 없습니다.".to_string())?
+                .map_err(|e| e2s("올리다가 실패했습니다", e))?;
+            m.add(n as u64);
         }
-        tokio::time::timeout(Duration::from_secs(60), dst.write_all(&buf[..n]))
-            .await
-            .map_err(|_| "올리는 중 응답이 없습니다.".to_string())?
-            .map_err(|e| e2s("올리다가 실패했습니다", e))?;
+        dst.shutdown().await.map_err(|e| e2s("올리다가 실패했습니다", e))
     }
-    dst.shutdown().await.map_err(|e| e2s("올리다가 실패했습니다", e))?;
-    Ok(remote)
+    .await;
+    if let Err(e) = result {
+        drop(dst);
+        // 쓰다 만 원격 파일은 지운다.
+        let _ = s.remove_file(remote.to_string()).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// 파일·폴더들을 원격 폴더로 올린다. 폴더는 안의 것까지 모두. 돌려주는 값은 올린 파일 수.
+pub async fn upload(conn: &Conn, locals: &[PathBuf], remote_dir: &str, t: &Transfer) -> Result<u32, String> {
+    let s = session(conn).await?;
+    let mut files = vec![];
+    let mut dirs = vec![];
+    for p in locals {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or("파일 이름이 없습니다.")?;
+        let meta = std::fs::metadata(p).map_err(|e| e2s(&format!("파일을 읽지 못했습니다 ({name})"), e))?;
+        let remote = join(remote_dir, &name);
+        if meta.is_dir() {
+            let (f, d) = walk_local(p, &remote)?;
+            files.extend(f);
+            dirs.extend(d);
+        } else {
+            files.push((p.clone(), remote, meta.len()));
+        }
+    }
+    for d in &dirs {
+        t.check()?;
+        if !s.try_exists(d.clone()).await.unwrap_or(false) {
+            s.create_dir(d.clone())
+                .await
+                .map_err(|e| e2s(&format!("원격 폴더를 만들지 못했습니다 ({d})"), e))?;
+        }
+    }
+    let total = files.iter().map(|f| f.2).sum();
+    let mut m = Meter::new(t, total, files.len() as u32);
+    for (l, r, _) in &files {
+        let shown = r
+            .strip_prefix(remote_dir)
+            .unwrap_or(r)
+            .trim_start_matches('/')
+            .to_string();
+        m.file(&shown);
+        copy_up(&s, l, r, &mut m).await?;
+        m.file_done();
+    }
+    Ok(m.p.files_done)
 }
 
 pub async fn mkdir(conn: &Conn, path: &str) -> Result<(), String> {
@@ -260,6 +490,32 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok);
+    }
+
+    #[test]
+    fn remote_base_name() {
+        assert_eq!(super::base_name("/var/log/"), "log");
+        assert_eq!(super::base_name("/srv/app/a.txt"), "a.txt");
+    }
+
+    #[test]
+    fn walks_local_folders_without_symlinks() {
+        let root = std::env::temp_dir()
+            .join(format!("walk-{}", uuid::Uuid::new_v4()))
+            .join("proj");
+        std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+        std::fs::write(root.join("a.txt"), b"12345").unwrap();
+        std::fs::write(root.join("sub/deep/b.txt"), b"xy").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("sub/loop")).unwrap();
+        let (files, dirs) = super::walk_local(&root, "/srv/proj").unwrap();
+        let mut remotes: Vec<_> = files.iter().map(|f| f.1.clone()).collect();
+        remotes.sort();
+        assert_eq!(remotes, vec!["/srv/proj/a.txt", "/srv/proj/sub/deep/b.txt"]);
+        assert_eq!(files.iter().map(|f| f.2).sum::<u64>(), 7);
+        let mut dirs = dirs;
+        dirs.sort();
+        assert_eq!(dirs, vec!["/srv/proj", "/srv/proj/sub", "/srv/proj/sub/deep"]);
     }
 
     #[test]

@@ -469,3 +469,13 @@ body.dragging-tab .term-slot { pointer-events: none; }
 .section-title .group-edit { opacity: 0; margin-left: 2px; }
 .section-title:hover .group-edit, .section-title .group-edit:focus-visible { opacity: 1; }
 .group-rename { flex: 1; min-width: 0; height: 22px; padding: 0 6px; border: 1px solid var(--accent); border-radius: 6px; background: var(--card); color: var(--text); font: inherit; font-size: 11px; font-weight: 700; outline: none; }
+
+/* 파일 창: 올리기 메뉴, 전송 진행률 */
+.upload-wrap { position: relative; display: inline-flex; }
+.upload-menu { position: absolute; z-index: 8; top: 30px; right: 0; display: flex; flex-direction: column; min-width: 140px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: var(--pop); }
+.upload-menu button { height: 30px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.upload-menu button:hover { background: var(--sel); color: var(--accent-text); }
+.sftp-transfer { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line-soft); font-size: 11px; }
+.sftp-transfer .row { display: flex; align-items: center; gap: 8px; }
+.sftp-transfer .label { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sftp-transfer .detail { color: var(--muted); font-family: var(--mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

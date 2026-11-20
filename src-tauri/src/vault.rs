@@ -472,7 +472,9 @@ pub mod backup {
         let dir = dir_for(vault);
         crate::fsperm::private_dir(&dir)?;
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f");
-        let dest = dir.join(format!("vault-{stamp}.sshv"));
+        // 같은 순간에 두 번 백업해도 겹치지 않게 짧은 임의 꼬리를 붙인다.
+        let tail = &uuid::Uuid::new_v4().simple().to_string()[..6];
+        let dest = dir.join(format!("vault-{stamp}-{tail}.sshv"));
         fs::copy(vault, &dest)?;
         crate::fsperm::fix_mode(&dest)?;
         // 복사본의 수정 시각을 지금으로 맞춘다(목록 정렬과 간격 계산에 쓴다).
