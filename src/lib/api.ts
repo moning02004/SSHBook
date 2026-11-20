@@ -29,6 +29,13 @@ export interface RemoteListing {
   entries: RemoteEntry[];
 }
 
+/** 보관함에 저장된 서버 키 */
+export interface KnownHost {
+  hostId: string;
+  algorithm: string;
+  fingerprint: string;
+}
+
 export interface TermLatency {
   id: string;
   ms: number;
@@ -116,6 +123,8 @@ export interface Backend {
   termOpen(sessionId: string | null, cols: number, rows: number, opts?: OpenOptions): Promise<string>;
   /** 사용자가 확인한 호스트 키를 보관함에 저장한다 */
   hostTrust(hostId: string): Promise<void>;
+  knownHostsList(): Promise<KnownHost[]>;
+  knownHostRemove(hostId: string): Promise<void>;
   termWrite(id: string, data: string): Promise<void>;
   termResize(id: string, cols: number, rows: number): Promise<void>;
   termClose(id: string): Promise<void>;
@@ -152,6 +161,8 @@ const tauriBackend: Backend = {
   termOpen: (sessionId, cols, rows, opts) =>
     invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null }),
   hostTrust: (hostId) => invoke("host_trust", { hostId }),
+  knownHostsList: () => invoke("known_hosts_list"),
+  knownHostRemove: (hostId) => invoke("known_host_remove", { hostId }),
   termWrite: (id, data) => invoke("term_write", { id, data }),
   termResize: (id, cols, rows) => invoke("term_resize", { id, cols, rows }),
   termClose: (id) => invoke("term_close", { id }),
@@ -231,7 +242,10 @@ function createMockBackend(): Backend {
     async vaultLock() {
       unlocked = false;
     },
-    async vaultChangePassword() {},
+    async vaultChangePassword(oldPassword) {
+      await wait();
+      if (oldPassword !== "test1234") throw "지금 마스터 비밀번호가 맞지 않습니다.";
+    },
     async vaultExport() {},
     async vaultImport() {
       exists = true;
@@ -346,6 +360,18 @@ function createMockBackend(): Backend {
     async termClose() {},
     async hostTrust() {
       if (pendingTrust) trusted.add(pendingTrust);
+    },
+    async knownHostsList() {
+      return [...trusted].map((id) => {
+        const s = sessions.find((x) => x.id === id);
+        return { hostId: `${s?.host}:${s?.port ?? 22}`, algorithm: "ssh-ed25519", fingerprint: "SHA256:mOcKpReViEw0nLy4bRoWsEr+xYz1234567890abc" };
+      });
+    },
+    async knownHostRemove(hostId) {
+      for (const id of trusted) {
+        const s = sessions.find((x) => x.id === id);
+        if (`${s?.host}:${s?.port ?? 22}` === hostId) trusted.delete(id);
+      }
     },
     async onTermData(cb) {
       dataSubs.add(cb);

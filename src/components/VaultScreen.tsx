@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, errorText, type VaultStatus } from "../lib/api";
 import { pickVaultToImport } from "../lib/dialogs";
+import { passwordStrength } from "../lib/passwordStrength";
 import { IconLock } from "./Icons";
+import { StrengthMeter } from "./StrengthMeter";
 
 interface Props {
   status: VaultStatus;
@@ -50,6 +52,7 @@ export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
     if (mode === "unlock") return run(() => api.vaultUnlock(password, remember));
     if (mode === "create") {
       if (password.length < MIN_LEN) return setError(`마스터 비밀번호는 ${MIN_LEN}자 이상이어야 합니다.`);
+      if (passwordStrength(password).score === 0) return setError("비밀번호가 너무 약합니다. 더 길게 하거나 흔한 단어를 빼세요.");
       if (password !== confirm) return setError("두 비밀번호가 다릅니다.");
       return run(() => api.vaultCreate(password));
     }
@@ -96,6 +99,7 @@ export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
           <span>마스터 비밀번호</span>
           <input className="input" type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
         </label>
+        {mode === "create" && <StrengthMeter password={password} />}
         {mode === "create" && (
           <label className="field">
             <span>한 번 더 입력</span>

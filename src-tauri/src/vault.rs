@@ -372,10 +372,10 @@ impl OpenVault {
     pub fn save(&self) -> Result<()> {
         let bytes = self.seal()?;
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
+            crate::fsperm::private_dir(dir)?;
         }
         let tmp = self.path.with_extension("sshv.tmp");
-        fs::write(&tmp, bytes)?;
+        crate::fsperm::write_private(&tmp, &bytes)?;
         fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -403,13 +403,16 @@ impl OpenVault {
 pub fn import(src: &Path, dest: &Path, password: &str) -> Result<OpenVault> {
     OpenVault::open(src, password)?; // 비밀번호가 맞는지 먼저 확인
     if let Some(dir) = dest.parent() {
-        fs::create_dir_all(dir)?;
+        crate::fsperm::private_dir(dir)?;
     }
     if dest.exists() && src != dest {
-        fs::copy(dest, dest.with_extension("sshv.bak"))?;
+        let bak = dest.with_extension("sshv.bak");
+        fs::copy(dest, &bak)?;
+        crate::fsperm::fix_mode(&bak)?;
     }
     if src != dest {
         fs::copy(src, dest)?;
+        crate::fsperm::fix_mode(dest)?;
     }
     OpenVault::open(dest, password)
 }

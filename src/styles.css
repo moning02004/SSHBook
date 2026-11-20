@@ -440,3 +440,21 @@ body.dragging-tab .term-slot { pointer-events: none; }
 .gtab.drop-after::before { right: -1px; }
 .drop-hint.center { inset: 4px; }
 .main { gap: 0; }
+
+/* ---- 비밀번호 강도 ---- */
+.strength { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: -6px; }
+.strength-bar { display: flex; gap: 3px; width: 120px; }
+.strength-bar span { flex: 1; height: 5px; border-radius: 3px; background: var(--line); }
+.strength.s0 .strength-bar span.on, .strength.s1 .strength-bar span.on { background: var(--danger); }
+.strength.s2 .strength-bar span.on { background: var(--warn); }
+.strength.s3 .strength-bar span.on, .strength.s4 .strength-bar span.on { background: var(--ok); }
+.strength-label { font-size: 12px; font-weight: 600; }
+.strength .hint { flex-basis: 100%; }
+
+/* ---- 알려진 서버 ---- */
+.kh-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+.kh-table th { text-align: left; font-weight: 600; color: var(--muted); padding: 6px 6px; border-bottom: 1px solid var(--line); }
+.kh-table th:nth-child(1) { width: 34%; } .kh-table th:nth-child(2) { width: 22%; } .kh-table th:nth-child(4) { width: 40px; }
+.kh-table td { padding: 6px; border-bottom: 1px solid var(--line-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kh-table .mono { font-family: var(--mono); }
+.kh-table .fp { font-size: 11px; }

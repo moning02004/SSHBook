@@ -338,7 +338,7 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                   <span>
                     출력 기록 저장
                     <br />
-                    <span className="hint">터미널 출력을 시각과 함께 파일로 남깁니다. 설정 → 세션 기록에서 폴더를 열 수 있습니다.</span>
+                    <span className="hint">터미널 출력을 시각과 함께 파일로 남깁니다(내 계정만 읽을 수 있게 저장). 화면에 보인 내용은 비밀번호나 토큰이라도 그대로 남으니 주의하세요. 설정 → 세션 기록에서 폴더를 열 수 있습니다.</span>
                   </span>
                 </label>
               </details>

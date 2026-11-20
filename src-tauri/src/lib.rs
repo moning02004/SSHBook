@@ -1,4 +1,5 @@
 mod forward;
+mod fsperm;
 #[cfg(test)]
 mod it_tests;
 mod keychain;
@@ -93,7 +94,10 @@ async fn vault_unlock(
     password: String,
     remember: Option<bool>,
 ) -> CmdResult<()> {
-    let v = OpenVault::open(&vault_path(&app)?, &password).map_err(|e| e.to_string())?;
+    let path = vault_path(&app)?;
+    let v = OpenVault::open(&path, &password).map_err(|e| e.to_string())?;
+    // 예전 버전이 만든 보관함(0644)도 내 계정만 읽게 맞춘다.
+    let _ = fsperm::fix_mode(&path);
     if remember == Some(true) {
         keychain::store(v.key())?;
     }
@@ -473,7 +477,7 @@ fn logs_dir(app: &AppHandle) -> CmdResult<PathBuf> {
 #[tauri::command]
 fn open_logs_dir(app: AppHandle) -> CmdResult<String> {
     let dir = logs_dir(&app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fsperm::private_dir(&dir).map_err(|e| e.to_string())?;
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -515,6 +519,29 @@ async fn term_open(
     };
     lock(&state.terms).insert(id.clone(), term);
     Ok(id)
+}
+
+/// 보관함에 저장된(확인한) 서버 키 목록. 지문은 연결할 때 보여 주는 것과 같다.
+#[tauri::command]
+fn known_hosts_list(state: State<'_, AppState>) -> CmdResult<Vec<ssh::KnownHost>> {
+    let guard = lock(&state.vault);
+    let v = guard.as_ref().ok_or(LOCKED)?;
+    Ok(v.data
+        .known_hosts
+        .iter()
+        .map(|(id, key)| ssh::describe_known(id, key))
+        .collect())
+}
+
+/// 저장된 서버 키를 지운다. 다음에 연결할 때 처음 보는 서버처럼 지문을 다시 묻는다.
+#[tauri::command]
+fn known_host_remove(state: State<'_, AppState>, host_id: String) -> CmdResult<()> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    if v.data.known_hosts.remove(&host_id).is_none() {
+        return Err("그 서버의 키가 저장돼 있지 않습니다.".into());
+    }
+    v.save().map_err(|e| e.to_string())
 }
 
 /// 사용자가 지문을 확인한 서버 키를 보관함에 저장한다.
@@ -733,6 +760,8 @@ pub fn run() {
             sftp_rename,
             term_open,
             host_trust,
+            known_hosts_list,
+            known_host_remove,
             term_write,
             term_resize,
             term_close,

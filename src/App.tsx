@@ -800,6 +800,7 @@ export function App() {
           remembered={status.remembered}
           onRemember={(on) => void setRemember(on)}
           onOpenLogs={() => void openLogs()}
+          onNotice={setNotice}
           onClose={() => setShowSettings(false)}
         />
       )}

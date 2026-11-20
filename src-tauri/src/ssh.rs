@@ -150,6 +150,30 @@ impl client::Handler for Client {
     }
 }
 
+/// 화면에 보여 줄 저장된 서버 키
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHost {
+    pub host_id: String,
+    pub algorithm: String,
+    pub fingerprint: String,
+}
+
+pub fn describe_known(host_id: &str, key: &str) -> KnownHost {
+    match PublicKey::from_openssh(key) {
+        Ok(k) => KnownHost {
+            host_id: host_id.into(),
+            algorithm: k.algorithm().to_string(),
+            fingerprint: k.fingerprint(HashAlg::Sha256).to_string(),
+        },
+        Err(_) => KnownHost {
+            host_id: host_id.into(),
+            algorithm: "?".into(),
+            fingerprint: "(읽을 수 없는 키)".into(),
+        },
+    }
+}
+
 fn host_key_prompt(kind: &'static str, host_id: String, key: &PublicKey) -> HostKeyPrompt {
     HostKeyPrompt {
         kind,
@@ -893,6 +917,16 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{}", e.into_message()));
         read_until(&mut rx, "welcome").await;
+    }
+
+    #[test]
+    fn known_host_fingerprint_matches_prompt() {
+        let key = pub_of(HOST_A);
+        let k = describe_known("example.com:22", &key);
+        let parsed = PublicKey::from_openssh(&key).unwrap();
+        assert_eq!(k.fingerprint, parsed.fingerprint(HashAlg::Sha256).to_string());
+        assert!(k.fingerprint.starts_with("SHA256:"));
+        assert_eq!(describe_known("x:22", "garbage").algorithm, "?");
     }
 
     #[test]

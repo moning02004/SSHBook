@@ -3,7 +3,7 @@
 //! 색·커서 이동 같은 제어 문자(ANSI escape)는 빼고 글자만 남긴다.
 //! 파일은 앱 데이터 폴더의 logs/ 아래에 "세션이름_날짜-시각.log"로 만든다.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -47,9 +47,9 @@ pub struct TermLog {
 impl TermLog {
     pub fn create(path: &Path, header: &str) -> std::io::Result<Self> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            crate::fsperm::private_dir(dir)?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = crate::fsperm::append_private(path)?;
         let mut log = TermLog {
             out: BufWriter::new(file),
             line_start: true,

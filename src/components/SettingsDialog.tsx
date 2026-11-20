@@ -15,7 +15,9 @@ import {
 } from "../lib/settings";
 import type { ThemeName } from "../lib/theme";
 import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
+import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { IconClose } from "./Icons";
+import { KnownHostsDialog } from "./KnownHostsDialog";
 
 export function useSettings() {
   return useSyncExternalStore(subscribeSettings, getSettings);
@@ -29,6 +31,8 @@ interface Props {
   onRemember: (on: boolean) => void;
   /** 세션 기록 폴더 열기 */
   onOpenLogs: () => void;
+  /** 화면 아래에 잠깐 보여 줄 알림 */
+  onNotice: (message: string) => void;
   onClose: () => void;
 }
 
@@ -60,7 +64,8 @@ const SHORTCUTS: [string, string][] = [
 const CUSTOM = "__custom__";
 
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
-export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenLogs, onClose }: Props) {
+export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenLogs, onNotice, onClose }: Props) {
+  const [sub, setSub] = useState<"password" | "hosts" | null>(null);
   const s = useSettings();
   const installed = useMemo(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])), []);
   const isPreset = s.fontFamily === "" || FONT_PRESETS.includes(s.fontFamily);
@@ -212,6 +217,14 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
               </select>
               <span className="hint">잠그면 열린 연결도 모두 끊깁니다.</span>
             </label>
+            <div className="row-gap">
+              <button className="btn" onClick={() => setSub("password")}>
+                마스터 비밀번호 바꾸기
+              </button>
+              <button className="btn" onClick={() => setSub("hosts")}>
+                알려진 서버 관리
+              </button>
+            </div>
             <label className="check">
               <input type="checkbox" checked={remembered} onChange={(e) => onRemember(e.target.checked)} />
               <span>
@@ -267,6 +280,16 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
           </button>
         </div>
       </div>
+      {sub === "password" && (
+        <ChangePasswordDialog
+          onClose={() => setSub(null)}
+          onDone={(m) => {
+            setSub(null);
+            onNotice(m);
+          }}
+        />
+      )}
+      {sub === "hosts" && <KnownHostsDialog onClose={() => setSub(null)} />}
     </div>
   );
 }
