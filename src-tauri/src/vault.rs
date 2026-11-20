@@ -145,6 +145,18 @@ pub struct Session {
     pub auth: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_path: Option<String>,
+    /// 탭·창 테두리에 보일 환경 색 ("red" | "orange" | "yellow" | "green" | "blue" | "purple")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// 거쳐 갈 서버(다른 SSH 세션의 id)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_id: Option<String>,
+    /// 연결할 때 함께 여는 포트 포워딩
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwards: Vec<Forward>,
+    /// 켜면 터미널 출력을 시각과 함께 파일로 남긴다
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub log_output: bool,
     // 아래는 화면 표시용. 프론트엔드에서 온 값은 무시하고, 목록을 돌려줄 때만 채운다.
     #[serde(default, skip_deserializing)]
     pub has_password: bool,
@@ -152,6 +164,39 @@ pub struct Session {
     pub has_private_key: bool,
     #[serde(default, skip_deserializing)]
     pub has_passphrase: bool,
+}
+
+/// 포트 포워딩 하나.
+/// - local(-L):   내 PC 127.0.0.1:bind_port → (서버에서 본) host:port
+/// - remote(-R):  서버 localhost:bind_port → (내 PC에서 본) host:port
+/// - dynamic(-D): 내 PC 127.0.0.1:bind_port에 SOCKS5 프록시
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Forward {
+    pub kind: ForwardKind,
+    pub bind_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardKind {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+/// 명령 모음(스니펫). 보관함에 같이 저장해서 다른 PC로도 따라간다.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Snippet {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    pub command: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
@@ -182,6 +227,8 @@ pub struct VaultData {
     /// "host:port" → 서버 공개 키(OpenSSH 한 줄). 사용자가 확인한 키만 들어간다.
     #[serde(default)]
     pub known_hosts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub snippets: Vec<Snippet>,
 }
 
 // ---- 열린 보관함 ----
@@ -231,6 +278,23 @@ impl OpenVault {
 
     /// 파일을 마스터 비밀번호로 연다. 어느 PC에서 만든 파일이든 같다.
     pub fn open(path: &Path, password: &str) -> Result<Self> {
+        Self::open_inner(path, |salt, params| derive_key(password, salt, params))
+    }
+
+    /// 키체인에 기억해 둔 키로 연다. 비밀번호를 바꿨거나 다른 보관함을 가져왔으면 실패한다.
+    pub fn open_with_key(path: &Path, key: &[u8]) -> Result<Self> {
+        Self::open_inner(path, |_, _| {
+            let k: [u8; 32] = key.try_into().map_err(|_| VaultError::Decrypt)?;
+            Ok(Zeroizing::new(k))
+        })
+    }
+
+    /// 키체인에 기억할 키
+    pub fn key(&self) -> &[u8] {
+        &self.key[..]
+    }
+
+    fn open_inner(path: &Path, make_key: impl FnOnce(&[u8], KdfParams) -> Result<Zeroizing<[u8; 32]>>) -> Result<Self> {
         let bytes = fs::read(path)?;
         let env: Envelope = serde_json::from_slice(&bytes).map_err(|_| VaultError::Format)?;
         let h = &env.header;
@@ -250,7 +314,7 @@ impl OpenVault {
             return Err(VaultError::Format);
         }
 
-        let key = derive_key(password, &salt, h.kdf.params)?;
+        let key = make_key(&salt, h.kdf.params)?;
         let aad = serde_json::to_vec(h).map_err(|_| VaultError::Format)?;
         let cipher = Aes256Gcm::new_from_slice(&key[..]).map_err(|_| VaultError::Decrypt)?;
         let plain = Zeroizing::new(
@@ -388,6 +452,10 @@ mod tests {
             user: Some("deploy".into()),
             auth: Some("password".into()),
             key_path: None,
+            color: None,
+            jump_id: None,
+            forwards: vec![],
+            log_output: false,
             has_password: false,
             has_private_key: false,
             has_passphrase: false,
@@ -407,6 +475,35 @@ mod tests {
         v.save().unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains(FORMAT));
         assert!(OpenVault::open(&path, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn open_with_remembered_key() {
+        let path = tmp_path("vault.sshv");
+        let mut v = OpenVault::create(&path, "correct horse", FAST).unwrap();
+        v.data.sessions.push(sample_session("s1"));
+        v.save().unwrap();
+        let key = v.key().to_vec();
+
+        let again = OpenVault::open_with_key(&path, &key).unwrap();
+        assert_eq!(again.data.sessions.len(), 1);
+        assert!(OpenVault::open_with_key(&path, &[0u8; 32]).is_err());
+        assert!(OpenVault::open_with_key(&path, &key[..10]).is_err());
+
+        // 비밀번호를 바꾸면 기억해 둔 옛 키로는 열리지 않는다.
+        v.change_password("battery staple").unwrap();
+        assert!(OpenVault::open_with_key(&path, &key).is_err());
+        assert!(OpenVault::open_with_key(&path, v.key()).is_ok());
+    }
+
+    #[test]
+    fn older_vault_without_new_fields_still_opens() {
+        let json =
+            r#"{"sessions":[{"id":"a","name":"n","kind":"ssh","host":"h","user":"u"}],"secrets":{},"known_hosts":{}}"#;
+        let d: VaultData = serde_json::from_str(json).unwrap();
+        assert!(d.snippets.is_empty());
+        let s = &d.sessions[0];
+        assert!(s.forwards.is_empty() && !s.log_output && s.color.is_none() && s.jump_id.is_none());
     }
 
     #[test]

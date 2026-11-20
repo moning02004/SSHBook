@@ -1,13 +1,18 @@
+mod forward;
+mod keychain;
 mod pty;
+mod sftp;
 mod ssh;
+mod termlog;
 mod vault;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use tauri::{AppHandle, Manager, State};
-use vault::{KdfParams, OpenVault, Secret, Session, SessionKind};
+use vault::{KdfParams, OpenVault, Secret, Session, SessionKind, Snippet};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 type CmdResult<T> = Result<T, String>;
@@ -52,6 +57,8 @@ struct VaultStatus {
     exists: bool,
     unlocked: bool,
     path: String,
+    /// 이 PC의 키체인에 보관함 키를 기억해 두었는지
+    remembered: bool,
 }
 
 #[tauri::command]
@@ -61,6 +68,7 @@ fn vault_status(app: AppHandle, state: State<'_, AppState>) -> CmdResult<VaultSt
         exists: path.exists(),
         unlocked: lock(&state.vault).is_some(),
         path: path.display().to_string(),
+        remembered: keychain::load().is_some(),
     })
 }
 
@@ -75,11 +83,51 @@ async fn vault_create(app: AppHandle, state: State<'_, AppState>, password: Stri
     Ok(())
 }
 
+/// remember가 true면 열린 보관함의 키를 이 PC의 키체인에 기억해 둔다.
 #[tauri::command]
-async fn vault_unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> CmdResult<()> {
+async fn vault_unlock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    password: String,
+    remember: Option<bool>,
+) -> CmdResult<()> {
     let v = OpenVault::open(&vault_path(&app)?, &password).map_err(|e| e.to_string())?;
+    if remember == Some(true) {
+        keychain::store(v.key())?;
+    }
     *lock(&state.vault) = Some(v);
     Ok(())
+}
+
+/// 키체인에 기억해 둔 키로 연다. 비밀번호가 바뀌었거나 다른 보관함을 가져왔으면 기억을 지운다.
+#[tauri::command]
+async fn vault_unlock_remembered(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let key = keychain::load().ok_or("이 PC에 기억된 보관함 키가 없습니다.")?;
+    match OpenVault::open_with_key(&vault_path(&app)?, &key) {
+        Ok(v) => {
+            *lock(&state.vault) = Some(v);
+            Ok(())
+        }
+        Err(vault::VaultError::Decrypt) => {
+            keychain::forget();
+            Err(
+                "기억해 둔 키로 열리지 않습니다(마스터 비밀번호가 바뀌었을 수 있습니다). 비밀번호로 열어 주세요."
+                    .into(),
+            )
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 설정에서 "이 PC에서 기억하기"를 켜고 끈다.
+#[tauri::command]
+fn vault_remember(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
+    if !on {
+        keychain::forget();
+        return Ok(());
+    }
+    let guard = lock(&state.vault);
+    keychain::store(guard.as_ref().ok_or(LOCKED)?.key())
 }
 
 #[tauri::command]
@@ -104,7 +152,12 @@ async fn vault_change_password(
     let mut guard = lock(&state.vault);
     let v = guard.as_mut().ok_or(LOCKED)?;
     OpenVault::open(v.path(), &old_password).map_err(|_| "지금 마스터 비밀번호가 맞지 않습니다.".to_string())?;
-    v.change_password(&new_password).map_err(|e| e.to_string())
+    v.change_password(&new_password).map_err(|e| e.to_string())?;
+    // 기억해 둔 키가 있으면 새 키로 바꿔 둔다.
+    if keychain::load().is_some() {
+        keychain::store(v.key())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -120,6 +173,8 @@ fn vault_export(state: State<'_, AppState>, dest: String) -> CmdResult<()> {
 #[tauri::command]
 async fn vault_import(app: AppHandle, state: State<'_, AppState>, src: String, password: String) -> CmdResult<()> {
     let v = vault::import(&PathBuf::from(src), &vault_path(&app)?, &password).map_err(|e| e.to_string())?;
+    // 다른 보관함이 됐으므로 예전 기억은 쓸모없다.
+    keychain::forget();
     *lock(&state.vault) = Some(v);
     Ok(())
 }
@@ -222,44 +277,103 @@ fn session_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let v = guard.as_mut().ok_or(LOCKED)?;
     v.data.sessions.retain(|s| s.id != id);
     v.data.secrets.remove(&id);
+    // 이 세션을 점프 호스트로 쓰던 세션은 바로 붙도록 되돌린다.
+    for s in v
+        .data
+        .sessions
+        .iter_mut()
+        .filter(|s| s.jump_id.as_deref() == Some(id.as_str()))
+    {
+        s.jump_id = None;
+    }
+    v.save().map_err(|e| e.to_string())
+}
+
+/// 같은 설정(저장된 비밀번호·키 포함)으로 새 세션을 만든다. 이름 뒤에 "복사"를 붙인다.
+#[tauri::command]
+fn session_duplicate(state: State<'_, AppState>, id: String) -> CmdResult<Session> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let mut s = v
+        .data
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .ok_or("세션을 찾을 수 없습니다.")?;
+    s.id = uuid::Uuid::new_v4().to_string();
+    s.name = format!("{} 복사", s.name);
+    if let Some(sec) = v.data.secrets.get(&id).cloned() {
+        v.data.secrets.insert(s.id.clone(), sec);
+    }
+    v.data.sessions.push(s.clone());
+    v.save().map_err(|e| e.to_string())?;
+    Ok(with_flags(s, &v.data.secrets))
+}
+
+// ---- 명령 모음 ----
+
+#[tauri::command]
+fn snippets_list(state: State<'_, AppState>) -> CmdResult<Vec<Snippet>> {
+    let guard = lock(&state.vault);
+    Ok(guard.as_ref().ok_or(LOCKED)?.data.snippets.clone())
+}
+
+#[tauri::command]
+fn snippet_save(state: State<'_, AppState>, snippet: Snippet) -> CmdResult<Snippet> {
+    let mut s = snippet;
+    if s.command.trim().is_empty() {
+        return Err("명령을 입력하세요.".into());
+    }
+    if s.name.trim().is_empty() {
+        s.name = s.command.lines().next().unwrap_or("").chars().take(40).collect();
+    }
+    if s.id.is_empty() {
+        s.id = uuid::Uuid::new_v4().to_string();
+    }
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    match v.data.snippets.iter_mut().find(|x| x.id == s.id) {
+        Some(x) => *x = s.clone(),
+        None => v.data.snippets.push(s.clone()),
+    }
+    v.save().map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+#[tauri::command]
+fn snippet_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    v.data.snippets.retain(|s| s.id != id);
     v.save().map_err(|e| e.to_string())
 }
 
 // ---- 터미널 ----
 
 enum Plan {
-    Local { shell: Option<String>, cwd: Option<String> },
-    Ssh(ssh::Target),
+    Local {
+        shell: Option<String>,
+        cwd: Option<String>,
+    },
+    Ssh {
+        connect: Box<ssh::Connect>,
+        /// 세션 기록을 켠 경우 (파일 경로, 머리글)
+        log: Option<(PathBuf, String)>,
+    },
 }
 
-/// 보관함에서 접속에 필요한 것만 꺼낸다. 잠금을 쥔 채 await하지 않도록 따로 둔다.
-fn plan_for(
-    state: &AppState,
-    session_id: Option<String>,
+/// 세션 하나의 SSH 접속 정보와 인증 수단을 보관함에서 꺼낸다.
+fn target_for(
+    v: &OpenVault,
+    s: &Session,
     password: Option<String>,
     passphrase: Option<String>,
-) -> CmdResult<Plan> {
-    let Some(sid) = session_id else {
-        return Ok(Plan::Local { shell: None, cwd: None });
-    };
-    let guard = lock(&state.vault);
-    let v = guard.as_ref().ok_or(LOCKED)?;
-    let s = v
-        .data
-        .sessions
-        .iter()
-        .find(|s| s.id == sid)
-        .ok_or("세션을 찾을 수 없습니다.")?;
-    if s.kind == SessionKind::Local {
-        return Ok(Plan::Local {
-            shell: s.shell.clone(),
-            cwd: s.cwd.clone(),
-        });
-    }
+) -> CmdResult<ssh::Target> {
     let host = s.host.clone().unwrap_or_default().trim().to_string();
     let user = s.user.clone().unwrap_or_default().trim().to_string();
     if host.is_empty() || user.is_empty() {
-        return Err("호스트와 사용자를 입력하세요.".into());
+        return Err(format!("'{}': 호스트와 사용자를 입력하세요.", s.name));
     }
     let port = s.port.unwrap_or(22);
     let sec = v.data.secrets.get(&s.id);
@@ -288,13 +402,88 @@ fn plan_for(
         _ => ssh::Auth::Password(z(password).or_else(|| z(sec.and_then(|x| x.password.clone())))),
     };
     let known_key = v.data.known_hosts.get(&ssh::host_id(&host, port)).cloned();
-    Ok(Plan::Ssh(ssh::Target {
+    Ok(ssh::Target {
         host,
         port,
         user,
         auth,
         known_key,
-    }))
+    })
+}
+
+/// 보관함에서 접속에 필요한 것만 꺼낸다. 잠금을 쥔 채 await하지 않도록 따로 둔다.
+fn plan_for(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: Option<String>,
+    password: Option<String>,
+    passphrase: Option<String>,
+) -> CmdResult<Plan> {
+    let Some(sid) = session_id else {
+        return Ok(Plan::Local { shell: None, cwd: None });
+    };
+    let guard = lock(&state.vault);
+    let v = guard.as_ref().ok_or(LOCKED)?;
+    let find = |id: &str| v.data.sessions.iter().find(|s| s.id == id);
+    let s = find(&sid).ok_or("세션을 찾을 수 없습니다.")?;
+    if s.kind == SessionKind::Local {
+        return Ok(Plan::Local {
+            shell: s.shell.clone(),
+            cwd: s.cwd.clone(),
+        });
+    }
+    let target = target_for(v, s, password, passphrase)?;
+    let jump = match s.jump_id.as_deref().filter(|j| !j.is_empty()) {
+        Some(jid) => {
+            let j = find(jid)
+                .filter(|j| j.kind == SessionKind::Ssh && j.id != s.id)
+                .ok_or("거쳐 갈 서버(점프 호스트) 세션을 찾을 수 없습니다. 세션 편집에서 다시 고르세요.")?;
+            Some(target_for(v, j, None, None)?)
+        }
+        None => None,
+    };
+    let log = if s.log_output {
+        let dir = logs_dir(app)?;
+        let header = format!(
+            "SSHBook 세션 기록 · {} · {}@{}:{}",
+            s.name, target.user, target.host, target.port
+        );
+        Some((termlog::log_path(&dir, &s.name), header))
+    } else {
+        None
+    };
+    Ok(Plan::Ssh {
+        connect: Box::new(ssh::Connect {
+            target,
+            jump,
+            start_dir: s.cwd.clone().filter(|d| !d.trim().is_empty()),
+            forwards: s.forwards.clone(),
+        }),
+        log,
+    })
+}
+
+fn logs_dir(app: &AppHandle) -> CmdResult<PathBuf> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("logs"))
+}
+
+/// 세션 기록 폴더를 Finder/탐색기로 연다.
+#[tauri::command]
+fn open_logs_dir(app: AppHandle) -> CmdResult<String> {
+    let dir = logs_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| format!("폴더를 열지 못했습니다: {e}"))?;
+    Ok(dir.display().to_string())
 }
 
 /// password / passphrase는 저장된 값이 없거나 틀려서 터미널에서 다시 물어본 값이다. 저장하지 않는다.
@@ -309,16 +498,18 @@ async fn term_open(
     passphrase: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
-    let term = match plan_for(&state, session_id, password, passphrase)? {
+    let term = match plan_for(&app, &state, session_id, password, passphrase)? {
         Plan::Local { shell, cwd } => Term::Local(pty::spawn(app, id.clone(), shell, cwd, cols, rows)?),
-        Plan::Ssh(target) => match ssh::connect(ssh::app_sink(app, id.clone()), target, cols, rows).await {
-            Ok(t) => Term::Ssh(t),
-            Err(ssh::OpenError::HostKey(p)) => {
-                lock(&state.pending_hosts).insert(p.host_id.clone(), p.key.clone());
-                return Err(ssh::OpenError::HostKey(p).into_message());
+        Plan::Ssh { connect, log } => {
+            match ssh::connect(ssh::app_sink(app, id.clone(), log), *connect, cols, rows).await {
+                Ok(t) => Term::Ssh(t),
+                Err(ssh::OpenError::HostKey(p)) => {
+                    lock(&state.pending_hosts).insert(p.host_id.clone(), p.key.clone());
+                    return Err(ssh::OpenError::HostKey(p).into_message());
+                }
+                Err(e) => return Err(e.into_message()),
             }
-            Err(e) => return Err(e.into_message()),
-        },
+        }
     };
     lock(&state.terms).insert(id.clone(), term);
     Ok(id)
@@ -359,6 +550,73 @@ fn term_close(state: State<'_, AppState>, id: String) {
     if let Some(t) = lock(&state.terms).remove(&id) {
         t.close();
     }
+}
+
+// ---- 파일 주고받기 (SFTP) ----
+
+fn conn_of(state: &AppState, id: &str) -> CmdResult<Arc<ssh::Conn>> {
+    match lock(&state.terms).get(id) {
+        Some(Term::Ssh(s)) => Ok(s.conn.clone()),
+        Some(Term::Local(_)) => Err("로컬 셸에서는 파일 창을 쓸 수 없습니다.".into()),
+        None => Err("연결이 끊어졌습니다.".into()),
+    }
+}
+
+/// 실패하면 SFTP 채널을 버려서 다음에 새로 열게 한다(채널이 끊겼을 수 있다).
+async fn sftp_call<T>(conn: &ssh::Conn, r: CmdResult<T>) -> CmdResult<T> {
+    if r.is_err() {
+        sftp::reset(conn).await;
+    }
+    r
+}
+
+#[tauri::command]
+async fn sftp_list(state: State<'_, AppState>, id: String, path: String) -> CmdResult<sftp::Listing> {
+    let c = conn_of(&state, &id)?;
+    let r = sftp::list(&c, &path).await;
+    sftp_call(&c, r).await
+}
+
+/// 이 탭의 셸이 지금 있는 폴더. 알 수 없으면 null.
+#[tauri::command]
+async fn sftp_cwd(state: State<'_, AppState>, id: String) -> CmdResult<Option<String>> {
+    let c = conn_of(&state, &id)?;
+    sftp::terminal_cwd(&c).await
+}
+
+#[tauri::command]
+async fn sftp_download(state: State<'_, AppState>, id: String, remote: String, local: String) -> CmdResult<u64> {
+    let c = conn_of(&state, &id)?;
+    let r = sftp::download(&c, &remote, &PathBuf::from(local)).await;
+    sftp_call(&c, r).await
+}
+
+#[tauri::command]
+async fn sftp_upload(state: State<'_, AppState>, id: String, local: String, remote_dir: String) -> CmdResult<String> {
+    let c = conn_of(&state, &id)?;
+    let r = sftp::upload(&c, &PathBuf::from(local), &remote_dir).await;
+    sftp_call(&c, r).await
+}
+
+#[tauri::command]
+async fn sftp_mkdir(state: State<'_, AppState>, id: String, path: String) -> CmdResult<()> {
+    let c = conn_of(&state, &id)?;
+    let r = sftp::mkdir(&c, &path).await;
+    sftp_call(&c, r).await
+}
+
+#[tauri::command]
+async fn sftp_remove(state: State<'_, AppState>, id: String, path: String, is_dir: bool) -> CmdResult<()> {
+    let c = conn_of(&state, &id)?;
+    let r = sftp::remove(&c, &path, is_dir).await;
+    sftp_call(&c, r).await
+}
+
+#[tauri::command]
+async fn sftp_rename(state: State<'_, AppState>, id: String, from: String, to: String) -> CmdResult<()> {
+    let c = conn_of(&state, &id)?;
+    let r = sftp::rename(&c, &from, &to).await;
+    sftp_call(&c, r).await
 }
 
 /// macOS 메뉴. 기본 메뉴의 ⌘W(창 닫기) 대신 "탭 닫기"를 두고, 누르면 화면에 알린다.
@@ -450,6 +708,8 @@ pub fn run() {
             vault_status,
             vault_create,
             vault_unlock,
+            vault_unlock_remembered,
+            vault_remember,
             vault_lock,
             vault_change_password,
             vault_export,
@@ -457,6 +717,18 @@ pub fn run() {
             sessions_list,
             session_save,
             session_delete,
+            session_duplicate,
+            snippets_list,
+            snippet_save,
+            snippet_delete,
+            open_logs_dir,
+            sftp_list,
+            sftp_cwd,
+            sftp_download,
+            sftp_upload,
+            sftp_mkdir,
+            sftp_remove,
+            sftp_rename,
             term_open,
             host_trust,
             term_write,

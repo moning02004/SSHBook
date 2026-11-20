@@ -5,15 +5,21 @@
 //! - 처음 보는 서버의 호스트 키는 접속을 멈추고 지문을 돌려준다. 사용자가 확인하면
 //!   보관함의 known_hosts에 저장한다(다른 PC로 옮길 때 같이 따라간다).
 //! - 에이전트 인증: macOS/Linux는 SSH_AUTH_SOCK, Windows는 OpenSSH 에이전트 파이프.
+//! - 점프 호스트: 먼저 그 서버에 붙고, 그 연결 안에 direct-tcpip 터널을 열어 목적지에 붙는다.
+//! - 시작 경로: 셸 대신 `cd 경로; exec $SHELL -l`을 실행한다.
 
+use crate::forward::{self, RemoteMap};
 use crate::pty::{TermData, TermExit};
+use crate::termlog::TermLog;
+use crate::vault::Forward;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use russh::client::{self, Handle};
 use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{ChannelMsg, Disconnect};
+use russh::{Channel, ChannelMsg, Disconnect};
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -93,9 +99,11 @@ fn ask(kind: &'static str, message: &str) -> OpenError {
 
 // ---- 호스트 키 확인 ----
 
-struct Client {
+pub struct Client {
     expected: Option<PublicKey>,
     seen: Arc<Mutex<Option<PublicKey>>>,
+    /// 원격 포워딩(-R): 서버가 열어 준 포트 → 내 PC에서 이어 줄 곳
+    remote: RemoteMap,
 }
 
 impl client::Handler for Client {
@@ -109,6 +117,36 @@ impl client::Handler for Client {
         let ok = self.expected.as_ref().is_some_and(|e| e.key_data() == key.key_data());
         *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
         Ok(ok)
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let dest = self
+            .remote
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&connected_port)
+            .cloned();
+        match dest {
+            Some((host, port)) => {
+                reply.accept().await;
+                tokio::spawn(forward::pipe_to_local(channel, host, port));
+            }
+            None => {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await
+            }
+        }
+        Ok(())
     }
 }
 
@@ -128,21 +166,86 @@ fn host_key_prompt(kind: &'static str, host_id: String, key: &PublicKey) -> Host
 pub enum Out {
     Data(Vec<u8>),
     Exit(Option<u32>),
+    /// 서버 응답 시간(ms)
+    Latency(u32),
 }
 pub type Sink = Arc<dyn Fn(Out) + Send + Sync>;
 
-pub fn app_sink(app: AppHandle, id: String) -> Sink {
-    Arc::new(move |o| {
-        let _ = match o {
-            Out::Data(b) => app.emit(
+#[derive(Serialize, Clone)]
+struct TermLatency {
+    id: String,
+    ms: u32,
+}
+
+/// 세션 기록 파일. 첫 출력이 올 때 연다(접속에 실패하면 파일을 만들지 않는다).
+enum LogState {
+    Pending(PathBuf, String),
+    Open(TermLog),
+    Off,
+}
+
+impl LogState {
+    /// 기록하고, 파일을 열지 못했으면 터미널에 보여 줄 경고를 돌려준다.
+    fn write(&mut self, data: &[u8]) -> Option<String> {
+        if let LogState::Pending(path, header) = self {
+            match TermLog::create(path, header) {
+                Ok(l) => *self = LogState::Open(l),
+                Err(e) => {
+                    let msg = format!("\x1b[33m[기록] 파일을 만들지 못해 이 세션은 기록하지 않습니다: {e}\x1b[0m\r\n");
+                    *self = LogState::Off;
+                    return Some(msg);
+                }
+            }
+        }
+        if let LogState::Open(l) = self {
+            if l.write(data).is_err() {
+                *self = LogState::Off;
+            }
+        }
+        None
+    }
+
+    fn finish(&mut self) {
+        if let LogState::Open(l) = self {
+            l.finish("연결 종료");
+        }
+        *self = LogState::Off;
+    }
+}
+
+/// log(파일 경로, 머리글)가 있으면 받은 출력을 세션 기록 파일에도 쓴다.
+pub fn app_sink(app: AppHandle, id: String, log: Option<(PathBuf, String)>) -> Sink {
+    let log = Mutex::new(match log {
+        Some((p, h)) => LogState::Pending(p, h),
+        None => LogState::Off,
+    });
+    let emit_data = {
+        let app = app.clone();
+        let id = id.clone();
+        move |b: Vec<u8>| {
+            let _ = app.emit(
                 "term-data",
                 TermData {
                     id: id.clone(),
                     data: B64.encode(b),
                 },
-            ),
-            Out::Exit(code) => app.emit("term-exit", TermExit { id: id.clone(), code }),
-        };
+            );
+        }
+    };
+    Arc::new(move |o| match o {
+        Out::Data(b) => {
+            if let Some(warn) = log.lock().unwrap_or_else(|e| e.into_inner()).write(&b) {
+                emit_data(warn.into_bytes());
+            }
+            emit_data(b);
+        }
+        Out::Exit(code) => {
+            log.lock().unwrap_or_else(|e| e.into_inner()).finish();
+            let _ = app.emit("term-exit", TermExit { id: id.clone(), code });
+        }
+        Out::Latency(ms) => {
+            let _ = app.emit("term-latency", TermLatency { id: id.clone(), ms });
+        }
     })
 }
 
@@ -154,6 +257,14 @@ enum Cmd {
 
 pub struct SshTerm {
     tx: mpsc::UnboundedSender<Cmd>,
+    /// 같은 연결 위에 SFTP 채널을 더 열 때 쓴다.
+    pub conn: Arc<Conn>,
+}
+
+/// 인증까지 끝난 SSH 연결. 셸 채널이 닫히면 함께 끊는다.
+pub struct Conn {
+    pub handle: Arc<Handle<Client>>,
+    pub sftp: tokio::sync::Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
 }
 
 impl SshTerm {
@@ -173,7 +284,27 @@ impl SshTerm {
     }
 }
 
-pub async fn connect(sink: Sink, t: Target, cols: u16, rows: u16) -> Result<SshTerm, OpenError> {
+/// 연결 한 번에 필요한 것
+pub struct Connect {
+    pub target: Target,
+    /// 거쳐 갈 서버. 그 서버의 인증은 보관함에 저장된 것만 쓴다(터미널에서 묻지 않는다).
+    pub jump: Option<Target>,
+    /// 연결하자마자 이동할 폴더. 없으면 서버 기본값(보통 홈 폴더).
+    pub start_dir: Option<String>,
+    pub forwards: Vec<Forward>,
+}
+
+fn config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Default::default()
+    })
+}
+
+/// TCP(또는 점프 호스트를 통한 터널)로 붙고 호스트 키 확인·인증까지 한다.
+async fn establish(t: Target, via: Option<&Handle<Client>>, remote: RemoteMap) -> Result<Handle<Client>, OpenError> {
     let hid = host_id(&t.host, t.port);
     let expected = t.known_key.as_deref().and_then(|k| PublicKey::from_openssh(k).ok());
     let had_known = expected.is_some();
@@ -181,27 +312,36 @@ pub async fn connect(sink: Sink, t: Target, cols: u16, rows: u16) -> Result<SshT
     let handler = Client {
         expected,
         seen: seen.clone(),
+        remote,
     };
+    let where_ = format!("{}:{}", t.host, t.port);
+    let timed_out = || OpenError::Other(format!("{where_}에 연결하지 못했습니다: 시간 초과"));
 
-    let config = Arc::new(client::Config {
-        inactivity_timeout: None,
-        keepalive_interval: Some(Duration::from_secs(30)),
-        keepalive_max: 3,
-        ..Default::default()
-    });
-
-    let result = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        client::connect(config, (t.host.as_str(), t.port), handler),
-    )
-    .await;
-    let mut handle = match result {
-        Err(_) => {
-            return Err(OpenError::Other(format!(
-                "{}:{}에 연결하지 못했습니다: 시간 초과",
-                t.host, t.port
-            )))
+    let result = match via {
+        Some(jump) => {
+            let ch = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                jump.channel_open_direct_tcpip(t.host.clone(), t.port as u32, "127.0.0.1", 0),
+            )
+            .await
+            .map_err(|_| timed_out())?
+            .map_err(|e| other(&format!("점프 호스트에서 {where_}로 가는 길을 열지 못했습니다"), e))?;
+            tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                client::connect_stream(config(), ch.into_stream(), handler),
+            )
+            .await
         }
+        None => {
+            tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                client::connect(config(), (t.host.as_str(), t.port), handler),
+            )
+            .await
+        }
+    };
+    let mut handle = match result {
+        Err(_) => return Err(timed_out()),
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
             // 호스트 키를 받았는데 거절된 경우라면 사용자에게 확인을 받는다.
@@ -211,11 +351,69 @@ pub async fn connect(sink: Sink, t: Target, cols: u16, rows: u16) -> Result<SshT
                     return Err(OpenError::HostKey(host_key_prompt(kind, hid, &key)));
                 }
             }
-            return Err(other(&format!("{}:{}에 연결하지 못했습니다", t.host, t.port), e));
+            return Err(other(&format!("{where_}에 연결하지 못했습니다"), e));
         }
     };
-
     authenticate(&mut handle, &t.user, t.auth).await?;
+    Ok(handle)
+}
+
+/// 점프 호스트에서 난 오류. 호스트 키 확인은 그대로 넘기고(어느 서버인지 지문 화면에 나온다),
+/// 비밀번호를 물어야 하는 경우는 보관함에 저장하라고 안내한다.
+fn jump_error(e: OpenError, label: &str) -> OpenError {
+    match e {
+        OpenError::HostKey(p) => OpenError::HostKey(p),
+        OpenError::Ask(a) => OpenError::Other(format!(
+            "점프 호스트 {label}: {}보관함에 저장된 {}가 필요합니다. 점프 호스트 세션에 저장해 주세요.",
+            if a.message.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", a.message)
+            },
+            if a.kind == "password" {
+                "비밀번호"
+            } else {
+                "키 암호"
+            }
+        )),
+        OpenError::Other(s) => OpenError::Other(format!("점프 호스트 {label}: {s}")),
+    }
+}
+
+/// 셸 대신 실행할 명령: 시작 폴더로 옮긴 뒤 로그인 셸을 띄운다. 폴더가 없으면 알리고 홈에서 시작한다.
+pub fn start_command(dir: &str) -> String {
+    let q = shell_path(dir.trim());
+    format!("cd {q} 2>/dev/null || echo \"시작 경로로 이동하지 못했습니다: \"{q}; exec \"$SHELL\" -l")
+}
+
+/// 셸에 넘길 경로. 작은따옴표로 감싸되, 맨 앞 ~는 셸이 홈으로 바꾸도록 따옴표 밖에 둔다.
+fn shell_path(p: &str) -> String {
+    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+    if p == "~" {
+        return "~".into();
+    }
+    match p.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", quote(rest)),
+        None => quote(p),
+    }
+}
+
+const PING_EVERY: Duration = Duration::from_secs(5);
+
+pub async fn connect(sink: Sink, c: Connect, cols: u16, rows: u16) -> Result<SshTerm, OpenError> {
+    let jump = match c.jump {
+        Some(j) => {
+            let label = format!("{}@{}", j.user, j.host);
+            Some(Arc::new(
+                establish(j, None, RemoteMap::default())
+                    .await
+                    .map_err(|e| jump_error(e, &label))?,
+            ))
+        }
+        None => None,
+    };
+    let remote = RemoteMap::default();
+    let handle = Arc::new(establish(c.target, jump.as_deref(), remote.clone()).await?);
 
     let ch = handle
         .channel_open_session()
@@ -232,12 +430,40 @@ pub async fn connect(sink: Sink, t: Target, cols: u16, rows: u16) -> Result<SshT
     )
     .await
     .map_err(|e| other("터미널(PTY)을 요청하지 못했습니다", e))?;
-    ch.request_shell(false)
-        .await
-        .map_err(|e| other("셸을 열지 못했습니다", e))?;
+    match c.start_dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        Some(dir) => ch
+            .exec(false, start_command(dir))
+            .await
+            .map_err(|e| other("시작 경로로 셸을 열지 못했습니다", e))?,
+        None => ch
+            .request_shell(false)
+            .await
+            .map_err(|e| other("셸을 열지 못했습니다", e))?,
+    }
+
+    let mut tasks = forward::start_all(&handle, &remote, &c.forwards, &sink).await;
+
+    // 응답 시간: 몇 초마다 서버에 ping을 보내 답이 오기까지 잰다.
+    {
+        let h = handle.clone();
+        let sink = sink.clone();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                let t0 = Instant::now();
+                if let Ok(Ok(())) = tokio::time::timeout(Duration::from_secs(10), h.send_ping()).await {
+                    sink(Out::Latency(t0.elapsed().as_millis().min(u32::MAX as u128) as u32));
+                }
+                tokio::time::sleep(PING_EVERY).await;
+            }
+        }));
+    }
 
     let (mut rd, wr) = ch.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
+    let conn = Arc::new(Conn {
+        handle: handle.clone(),
+        sftp: tokio::sync::Mutex::new(None),
+    });
 
     tauri::async_runtime::spawn(async move {
         let mut code: Option<u32> = None;
@@ -264,11 +490,15 @@ pub async fn connect(sink: Sink, t: Target, cols: u16, rows: u16) -> Result<SshT
                 },
             }
         }
+        tasks.iter().for_each(|t| t.abort());
         let _ = handle.disconnect(Disconnect::ByApplication, "", "ko").await;
+        if let Some(j) = jump {
+            let _ = j.disconnect(Disconnect::ByApplication, "", "ko").await;
+        }
         sink(Out::Exit(code));
     });
 
-    Ok(SshTerm { tx })
+    Ok(SshTerm { tx, conn })
 }
 
 // ---- 인증 ----
@@ -375,7 +605,11 @@ mod tests {
     const CLIENT: &str = include_str!("testdata/client");
     const CLIENT_PUB: &str = include_str!("testdata/client.pub");
 
-    struct TestServer;
+    /// 연결마다 하나. 셸 채널에서만 echo하고, 터널(direct-tcpip) 채널 데이터는 건드리지 않는다.
+    #[derive(Default)]
+    struct TestServer {
+        sessions: std::collections::HashSet<ChannelId>,
+    }
 
     impl server::Handler for TestServer {
         type Error = russh::Error;
@@ -399,10 +633,11 @@ mod tests {
 
         async fn channel_open_session(
             &mut self,
-            _: Channel<Msg>,
+            ch: Channel<Msg>,
             reply: server::ChannelOpenHandle,
             _: &mut SSession,
         ) -> Result<(), Self::Error> {
+            self.sessions.insert(ch.id());
             reply.accept().await;
             Ok(())
         }
@@ -428,6 +663,35 @@ mod tests {
             Ok(())
         }
 
+        async fn exec_request(&mut self, ch: ChannelId, data: &[u8], s: &mut SSession) -> Result<(), Self::Error> {
+            s.data(ch, [b"exec:", data, b"\r\nwelcome\r\n"].concat())?;
+            Ok(())
+        }
+
+        /// 점프 호스트·로컬 포워딩 확인용: 요청받은 곳에 TCP로 붙어 그대로 잇는다.
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: Channel<Msg>,
+            host: &str,
+            port: u32,
+            _: &str,
+            _: u32,
+            reply: server::ChannelOpenHandle,
+            _: &mut SSession,
+        ) -> Result<(), Self::Error> {
+            match tokio::net::TcpStream::connect((host.to_string(), port as u16)).await {
+                Ok(mut sock) => {
+                    reply.accept().await;
+                    tokio::spawn(async move {
+                        let mut stream = channel.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut sock, &mut stream).await;
+                    });
+                }
+                Err(_) => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
+            }
+            Ok(())
+        }
+
         async fn window_change_request(
             &mut self,
             ch: ChannelId,
@@ -442,6 +706,9 @@ mod tests {
         }
 
         async fn data(&mut self, ch: ChannelId, data: &[u8], s: &mut SSession) -> Result<(), Self::Error> {
+            if !self.sessions.contains(&ch) {
+                return Ok(());
+            }
             if data == b"exit" {
                 s.exit_status_request(ch, 7)?;
                 s.eof(ch)?;
@@ -467,7 +734,7 @@ mod tests {
             while let Ok((sock, _)) = listener.accept().await {
                 let config = config.clone();
                 tokio::spawn(async move {
-                    if let Ok(running) = server::run_stream(config, sock, TestServer).await {
+                    if let Ok(running) = server::run_stream(config, sock, TestServer::default()).await {
                         let _ = running.await;
                     }
                 });
@@ -491,6 +758,15 @@ mod tests {
             user: "tester".into(),
             auth,
             known_key,
+        }
+    }
+
+    fn plain(t: Target) -> Connect {
+        Connect {
+            target: t,
+            jump: None,
+            start_dir: None,
+            forwards: vec![],
         }
     }
 
@@ -522,7 +798,7 @@ mod tests {
     }
 
     async fn open_err(t: Target) -> OpenError {
-        match connect(sink().0, t, 80, 24).await {
+        match connect(sink().0, plain(t), 80, 24).await {
             Ok(_) => panic!("실패해야 하는 접속이 성공했습니다"),
             Err(e) => e,
         }
@@ -556,7 +832,7 @@ mod tests {
     async fn password_session_round_trip() {
         let port = start_server(HOST_A).await;
         let (sink, mut rx) = sink();
-        let term = connect(sink, target(port, pw("right-pw"), Some(pub_of(HOST_A))), 100, 30)
+        let term = connect(sink, plain(target(port, pw("right-pw"), Some(pub_of(HOST_A)))), 100, 30)
             .await
             .unwrap_or_else(|e| panic!("{}", e.into_message()));
         let got = read_until(&mut rx, "welcome").await;
@@ -613,9 +889,123 @@ mod tests {
             _ => panic!("틀린 키 암호는 다시 물어야 합니다"),
         }
         let (sink, mut rx) = sink();
-        let _term = connect(sink, target(port, key(Some("testpass")), known), 80, 24)
+        let _term = connect(sink, plain(target(port, key(Some("testpass")), known)), 80, 24)
             .await
             .unwrap_or_else(|e| panic!("{}", e.into_message()));
         read_until(&mut rx, "welcome").await;
+    }
+
+    #[test]
+    fn start_command_quotes_paths() {
+        assert_eq!(shell_path("/srv"), "'/srv'");
+        assert_eq!(shell_path("~"), "~");
+        assert_eq!(shell_path("~/my app"), "~/'my app'");
+        assert_eq!(shell_path("/a'b"), r"'/a'\''b'");
+        assert!(start_command(" /srv ").starts_with("cd '/srv' 2>/dev/null ||"));
+    }
+
+    #[tokio::test]
+    async fn start_dir_runs_cd_then_login_shell() {
+        let port = start_server(HOST_A).await;
+        let (sink, mut rx) = sink();
+        let mut c = plain(target(port, pw("right-pw"), Some(pub_of(HOST_A))));
+        c.start_dir = Some("/srv".into());
+        let _term = connect(sink, c, 80, 24)
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.into_message()));
+        let got = read_until(&mut rx, "welcome").await;
+        assert!(got.contains("exec:cd '/srv'"), "{got:?}");
+        assert!(got.contains("exec \"$SHELL\" -l"), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn connects_through_jump_host() {
+        let jump_port = start_server(HOST_B).await;
+        let dest_port = start_server(HOST_A).await;
+        let (sink, mut rx) = sink();
+        let c = Connect {
+            target: target(dest_port, pw("right-pw"), Some(pub_of(HOST_A))),
+            jump: Some(target(jump_port, pw("right-pw"), Some(pub_of(HOST_B)))),
+            start_dir: None,
+            forwards: vec![],
+        };
+        let term = connect(sink, c, 80, 24)
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.into_message()));
+        read_until(&mut rx, "welcome").await;
+        term.write("via-jump").unwrap();
+        read_until(&mut rx, "echo:via-jump").await;
+    }
+
+    #[tokio::test]
+    async fn jump_host_errors_are_labelled() {
+        let jump_port = start_server(HOST_B).await;
+        let dest_port = start_server(HOST_A).await;
+        let c = Connect {
+            target: target(dest_port, pw("right-pw"), Some(pub_of(HOST_A))),
+            jump: Some(target(jump_port, Auth::Password(None), Some(pub_of(HOST_B)))),
+            start_dir: None,
+            forwards: vec![],
+        };
+        match connect(sink().0, c, 80, 24).await {
+            Err(OpenError::Other(s)) => assert!(s.starts_with("점프 호스트 tester@127.0.0.1"), "{s}"),
+            _ => panic!("점프 호스트 비밀번호가 없다고 알려야 합니다"),
+        }
+        // 점프 호스트의 호스트 키도 확인을 받는다.
+        let c = Connect {
+            target: target(dest_port, pw("right-pw"), Some(pub_of(HOST_A))),
+            jump: Some(target(jump_port, pw("right-pw"), None)),
+            start_dir: None,
+            forwards: vec![],
+        };
+        match connect(sink().0, c, 80, 24).await {
+            Err(OpenError::HostKey(p)) => assert_eq!(p.host_id, format!("127.0.0.1:{jump_port}")),
+            _ => panic!("점프 호스트의 호스트 키를 물어야 합니다"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_forward_reaches_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 서버 쪽에서 닿을 '내부 서비스': 받은 것을 대문자로 돌려준다.
+        let svc = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let svc_port = svc.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = svc.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    if let Ok(n) = s.read(&mut buf).await {
+                        let _ = s.write_all(&buf[..n].to_ascii_uppercase()).await;
+                    }
+                });
+            }
+        });
+        // 비어 있는 로컬 포트를 하나 고른다.
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_port = free.local_addr().unwrap().port();
+        drop(free);
+
+        let port = start_server(HOST_A).await;
+        let (sink, mut rx) = sink();
+        let mut c = plain(target(port, pw("right-pw"), Some(pub_of(HOST_A))));
+        c.forwards = vec![Forward {
+            kind: crate::vault::ForwardKind::Local,
+            bind_port,
+            host: Some("127.0.0.1".into()),
+            port: Some(svc_port),
+        }];
+        let _term = connect(sink, c, 80, 24)
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.into_message()));
+        read_until(&mut rx, "[포워딩]").await;
+
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", bind_port)).await.unwrap();
+        s.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"PING");
     }
 }
