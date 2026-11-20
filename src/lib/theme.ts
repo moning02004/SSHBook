@@ -1,7 +1,7 @@
 import type { ITheme } from "@xterm/xterm";
 
 export type ThemeName = "light" | "dark";
-const KEY = "ssh-terminal.theme";
+const KEY = "sshbook.theme";
 
 /** 기본은 라이트. 사용자가 바꾸면 그 값을 기억한다. */
 export function loadTheme(): ThemeName {

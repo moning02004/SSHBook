@@ -1,6 +1,6 @@
 // 이 PC에만 기억하는 화면 설정. 보관함과 상관없고, 못 읽으면 기본값을 쓴다.
 
-const PREFIX = "ssh-terminal.";
+const PREFIX = "sshbook.";
 
 export function loadFlag(key: string, fallback: boolean): boolean {
   try {

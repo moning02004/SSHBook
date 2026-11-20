@@ -1,11 +1,11 @@
 [package]
-name = "ssh-terminal"
+name = "sshbook"
 version = "0.1.0"
-description = "SSH / 로컬 터미널"
+description = "SSHBook — SSH / 로컬 터미널"
 edition = "2021"
 
 [lib]
-name = "ssh_terminal_lib"
+name = "sshbook_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

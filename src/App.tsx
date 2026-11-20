@@ -336,7 +336,7 @@ export function App() {
         </button>
         <div className="brand">
           <IconPrompt width={18} height={18} style={{ color: "var(--accent)" }} />
-          SSH Terminal
+          SSHBook
         </div>
         <span style={{ flex: 1 }} />
         <button className="icon-btn" aria-label="설정" title={`설정 (${isMac ? "⌘" : "Ctrl+"},)`} onClick={() => setShowSettings(true)}>

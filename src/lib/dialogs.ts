@@ -1,7 +1,7 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { inTauri } from "./api";
 
-const VAULT_FILTER = [{ name: "SSH Terminal 보관함", extensions: ["sshv"] }];
+const VAULT_FILTER = [{ name: "SSHBook 보관함", extensions: ["sshv"] }];
 
 export async function pickKeyFile(): Promise<string | null> {
   if (!inTauri) return window.prompt("개인 키 파일 경로", "~/.ssh/id_ed25519");

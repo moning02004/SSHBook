@@ -1,0 +1,66 @@
+# 설치 파일 빌드 + GitHub Releases에 올리기
+#
+# 쓰는 법: 버전 태그를 올리면 Windows·macOS 설치 파일을 만들어 릴리스에 붙인다.
+#   git tag v0.1.0 && git push origin v0.1.0
+# Actions 탭에서 "Run workflow"로 직접 돌릴 수도 있다(이때는 지금 버전으로 릴리스를 만든다).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust_targets: ""
+          # Intel·Apple Silicon 둘 다 도는 하나의 앱(universal)
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: SSHBook v__VERSION__
+          releaseBody: |
+            ## 내려받기
+            - **Windows**: `SSHBook_x.y.z_x64-setup.exe`(설치 프로그램) 또는 `.msi`
+            - **macOS** (Intel·Apple Silicon 공용): `SSHBook_x.y.z_universal.dmg`
+
+            서명하지 않은 빌드라서 처음 실행할 때 경고가 뜹니다. README의 "설치" 부분을 참고하세요.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

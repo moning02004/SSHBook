@@ -7,7 +7,7 @@
 //! 형식 (JSON):
 //! ```json
 //! {
-//!   "format": "ssh-terminal-vault", "version": 1,
+//!   "format": "sshbook-vault", "version": 1,
 //!   "kdf":    { "alg": "argon2id", "m_kib": 65536, "t": 3, "p": 1, "salt": "<base64 16B>" },
 //!   "cipher": { "alg": "aes-256-gcm", "nonce": "<base64 12B>" },
 //!   "ciphertext": "<base64>"
@@ -28,7 +28,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const FORMAT: &str = "ssh-terminal-vault";
+pub const FORMAT: &str = "sshbook-vault";
+/// 예전 이름(SSH Terminal)으로 만든 보관함도 연다. 다음에 저장할 때 새 이름으로 바뀐다.
+const LEGACY_FORMATS: &[&str] = &["ssh-terminal-vault"];
 pub const VERSION: u32 = 1;
 const KDF_ALG: &str = "argon2id";
 const CIPHER_ALG: &str = "aes-256-gcm";
@@ -232,7 +234,7 @@ impl OpenVault {
         let bytes = fs::read(path)?;
         let env: Envelope = serde_json::from_slice(&bytes).map_err(|_| VaultError::Format)?;
         let h = &env.header;
-        if h.format != FORMAT {
+        if h.format != FORMAT && !LEGACY_FORMATS.contains(&h.format.as_str()) {
             return Err(VaultError::Format);
         }
         if h.version > VERSION {
@@ -271,10 +273,14 @@ impl OpenVault {
     }
 
     fn seal(&self) -> Result<Vec<u8>> {
+        self.seal_as(FORMAT)
+    }
+
+    fn seal_as(&self, format: &str) -> Result<Vec<u8>> {
         let plain = Zeroizing::new(serde_json::to_vec(&self.data).map_err(|_| VaultError::Format)?);
         let nonce = random::<NONCE_LEN>()?;
         let header = Header {
-            format: FORMAT.into(),
+            format: format.into(),
             version: VERSION,
             kdf: KdfHeader {
                 alg: KDF_ALG.into(),
@@ -386,6 +392,32 @@ mod tests {
             has_private_key: false,
             has_passphrase: false,
         }
+    }
+
+    #[test]
+    fn legacy_format_opens_and_upgrades_on_save() {
+        let path = tmp_path("vault.sshv");
+        let mut v = OpenVault::create(&path, "correct horse", FAST).unwrap();
+        v.data.sessions.push(sample_session("s1"));
+        fs::write(&path, v.seal_as(LEGACY_FORMATS[0]).unwrap()).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains(LEGACY_FORMATS[0]));
+
+        let v = OpenVault::open(&path, "correct horse").unwrap();
+        assert_eq!(v.data.sessions.len(), 1);
+        v.save().unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains(FORMAT));
+        assert!(OpenVault::open(&path, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn unknown_format_is_rejected() {
+        let path = tmp_path("vault.sshv");
+        let v = OpenVault::create(&path, "correct horse", FAST).unwrap();
+        fs::write(&path, v.seal_as("other-app").unwrap()).unwrap();
+        assert!(matches!(
+            OpenVault::open(&path, "correct horse"),
+            Err(VaultError::Format)
+        ));
     }
 
     #[test]

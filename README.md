@@ -1,6 +1,37 @@
-# SSH Terminal
+# SSHBook
 
-Windows와 macOS에서 쓰는 SSH / 로컬 터미널. Tauri 2 + React + xterm.js.
+Windows와 macOS에서 쓰는 SSH / 로컬 터미널. 서버 접속 정보를 마스터 비밀번호로 잠근 보관함 하나에 모아 둔다.
+Tauri 2 + React + xterm.js.
+
+## 설치
+
+[Releases](https://github.com/moning02004/SSHBook/releases/latest)에서 내려받는다.
+
+| OS | 파일 |
+|---|---|
+| Windows 10/11 | `SSHBook_<버전>_x64-setup.exe` (또는 `.msi`) |
+| macOS 11 이상 (Intel·Apple Silicon) | `SSHBook_<버전>_universal.dmg` |
+
+코드 서명을 하지 않은 빌드라서 처음 실행할 때 OS가 경고한다.
+
+- **Windows**: "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**.
+  스마트 앱 컨트롤이 켜진 PC에서는 서명 없는 앱이 아예 막힐 수 있다.
+- **macOS**: "확인되지 않은 개발자" 또는 "손상되었기 때문에 열 수 없습니다"가 뜨면
+  앱을 `응용 프로그램`으로 옮긴 뒤 터미널에서 한 번 실행한다.
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/SSHBook.app
+  ```
+
+## 릴리스 만들기
+
+`src-tauri/tauri.conf.json`의 `version`을 올리고, 같은 버전 태그를 올리면
+GitHub Actions(`.github/workflows/release.yml`)가 Windows·macOS 설치 파일을 만들어 Releases에 붙인다.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## 지금 되는 것
 
@@ -62,7 +93,7 @@ npm run tauri build    # 설치 파일 만들기 (Windows: .msi/.exe, macOS: .dm
 
 ```json
 {
-  "format": "ssh-terminal-vault",
+  "format": "sshbook-vault",
   "version": 1,
   "kdf":    { "alg": "argon2id", "m_kib": 65536, "t": 3, "p": 1, "salt": "<base64>" },
   "cipher": { "alg": "aes-256-gcm", "nonce": "<base64>" },
@@ -76,8 +107,8 @@ npm run tauri build    # 설치 파일 만들기 (Windows: .msi/.exe, macOS: .dm
 - 복호화는 Rust 쪽에서만 한다. 프론트엔드에는 비밀 정보가 "있음/없음"만 전달된다.
 - 마스터 비밀번호는 복구할 수 없다.
 
-저장 위치: Windows `%APPDATA%\com.example.sshterminal\vault.sshv`, macOS `~/Library/Application Support/com.example.sshterminal/vault.sshv`.
-배포 전에 `src-tauri/tauri.conf.json`의 `identifier`를 실제 값으로 바꾼다(바꾸면 저장 폴더도 바뀐다).
+저장 위치: Windows `%APPDATA%\com.moning02004.sshbook\vault.sshv`, macOS `~/Library/Application Support/com.moning02004.sshbook/vault.sshv`.
+예전 이름(SSH Terminal)으로 만든 보관함(`"format": "ssh-terminal-vault"`)도 그대로 열리고, 다음에 저장할 때 새 형식 이름으로 바뀐다.
 
 ## 구조
 

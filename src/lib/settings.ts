@@ -82,7 +82,7 @@ export function normalize(raw: unknown): Settings {
 
 // ---- 저장과 구독 ----
 
-const KEY = "ssh-terminal.settings";
+const KEY = "sshbook.settings";
 const OLD_ASK_ON_CLOSE = "ssh-terminal.askOnClose";
 
 function read(): Settings {
