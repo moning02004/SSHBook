@@ -1,0 +1,36 @@
+[package]
+name = "ssh-terminal"
+version = "0.1.0"
+description = "SSH / 로컬 터미널"
+edition = "2021"
+
+[lib]
+name = "ssh_terminal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# 보관함 암호화. API가 안정된 버전으로 고정한다.
+argon2 = "0.5"
+aes-gcm = "0.10"
+getrandom = "0.2"
+base64 = "0.22"
+zeroize = { version = "1", features = ["derive"] }
+# 로컬 셸 (Windows는 ConPTY, macOS는 openpty)
+portable-pty = "0.9"
+uuid = { version = "1", features = ["v4"] }
+# SSH 클라이언트. aws-lc-rs는 Windows에서 NASM이 필요해서 ring 백엔드를 쓴다.
+russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1.54.1", features = ["sync", "rt", "macros", "time", "net"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
