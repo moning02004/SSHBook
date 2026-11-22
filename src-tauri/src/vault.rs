@@ -278,23 +278,6 @@ impl OpenVault {
 
     /// 파일을 마스터 비밀번호로 연다. 어느 PC에서 만든 파일이든 같다.
     pub fn open(path: &Path, password: &str) -> Result<Self> {
-        Self::open_inner(path, |salt, params| derive_key(password, salt, params))
-    }
-
-    /// 키체인에 기억해 둔 키로 연다. 비밀번호를 바꿨거나 다른 보관함을 가져왔으면 실패한다.
-    pub fn open_with_key(path: &Path, key: &[u8]) -> Result<Self> {
-        Self::open_inner(path, |_, _| {
-            let k: [u8; 32] = key.try_into().map_err(|_| VaultError::Decrypt)?;
-            Ok(Zeroizing::new(k))
-        })
-    }
-
-    /// 키체인에 기억할 키
-    pub fn key(&self) -> &[u8] {
-        &self.key[..]
-    }
-
-    fn open_inner(path: &Path, make_key: impl FnOnce(&[u8], KdfParams) -> Result<Zeroizing<[u8; 32]>>) -> Result<Self> {
         let bytes = fs::read(path)?;
         let env: Envelope = serde_json::from_slice(&bytes).map_err(|_| VaultError::Format)?;
         let h = &env.header;
@@ -314,7 +297,7 @@ impl OpenVault {
             return Err(VaultError::Format);
         }
 
-        let key = make_key(&salt, h.kdf.params)?;
+        let key = derive_key(password, &salt, h.kdf.params)?;
         let aad = serde_json::to_vec(h).map_err(|_| VaultError::Format)?;
         let cipher = Aes256Gcm::new_from_slice(&key[..]).map_err(|_| VaultError::Decrypt)?;
         let plain = Zeroizing::new(
@@ -390,6 +373,37 @@ impl OpenVault {
         self.key = derive_key(new_password, &salt, self.params)?;
         self.salt = salt;
         self.save()
+    }
+
+    /// 지금 내용을 다른 비밀번호로 잠근 파일로 내보낸다(이 보관함은 그대로).
+    /// 마스터 비밀번호 없이 쓸 때: 다른 PC에는 이 PC의 열쇠 파일이 없기 때문이다.
+    pub fn export_with_password(&self, dest: &Path, password: &str) -> Result<()> {
+        let salt = random::<SALT_LEN>()?.to_vec();
+        let copy = OpenVault {
+            path: dest.to_path_buf(),
+            key: derive_key(password, &salt, self.params)?,
+            params: self.params,
+            salt,
+            data: self.data.clone(),
+        };
+        crate::fsperm::write_private(dest, &copy.seal()?)?;
+        Ok(())
+    }
+
+    /// 이 파일만 새 비밀번호로 다시 잠근다(백업을 만들지 않고, 수정 시각도 유지한다).
+    fn reseal_in_place(&mut self, new_password: &str) -> Result<()> {
+        let when = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        let salt = random::<SALT_LEN>()?.to_vec();
+        self.key = derive_key(new_password, &salt, self.params)?;
+        self.salt = salt;
+        let bytes = self.seal()?;
+        let tmp = self.path.with_extension("sshv.tmp");
+        crate::fsperm::write_private(&tmp, &bytes)?;
+        fs::rename(&tmp, &self.path)?;
+        if let (Some(t), Ok(f)) = (when, fs::File::options().write(true).open(&self.path)) {
+            let _ = f.set_modified(t);
+        }
+        Ok(())
     }
 
     /// 지금 내용을 저장한 뒤 파일을 그대로 복사한다. 내보낸 파일도 같은 비밀번호로 잠겨 있다.
@@ -485,6 +499,18 @@ pub mod backup {
             let _ = fs::remove_file(old.path);
         }
         Ok(Some(dest))
+    }
+
+    /// old 비밀번호로 열리는 백업을 new로 다시 잠근다(다른 비밀번호의 백업은 그대로). 바꾼 개수.
+    pub fn rekey(vault: &Path, old: &str, new: &str) -> usize {
+        list(vault)
+            .iter()
+            .filter(|b| {
+                super::OpenVault::open(Path::new(&b.path), old)
+                    .and_then(|mut v| v.reseal_in_place(new))
+                    .is_ok()
+            })
+            .count()
     }
 
     /// 복구할 파일이 정말 이 보관함의 백업 폴더 안에 있는지
@@ -605,6 +631,45 @@ mod tests {
     }
 
     #[test]
+    fn passwordless_round_trip_keeps_backups_openable() {
+        let path = tmp_path("vault.sshv");
+        let mut v = OpenVault::create(&path, "master one", FAST).unwrap();
+        v.data.sessions.push(sample_session("s1"));
+        v.save().unwrap();
+
+        // 끄기: 임의 비밀번호로 다시 잠근다. 그 직전 백업은 옛 비밀번호로 남는다.
+        v.change_password("random-secret").unwrap();
+        assert!(OpenVault::open(&path, "random-secret").is_ok());
+        assert!(OpenVault::open(&path, "master one").is_err());
+
+        // 내보내기는 받은 비밀번호로 잠기고, 이 보관함은 그대로다.
+        let out = tmp_path("export.sshv");
+        v.export_with_password(&out, "for other pc").unwrap();
+        assert_eq!(OpenVault::open(&out, "for other pc").unwrap().data.sessions.len(), 1);
+        assert!(OpenVault::open(&out, "random-secret").is_err());
+        assert!(OpenVault::open(&path, "random-secret").is_ok());
+
+        // 다시 켜기: 끈 동안의 백업도 새 비밀번호로 열려야 한다.
+        v.change_password("master two").unwrap();
+        let before: Vec<u64> = backup::list(&path).iter().map(|b| b.modified).collect();
+        assert_eq!(backup::rekey(&path, "random-secret", "master two"), 1);
+        let list = backup::list(&path);
+        assert_eq!(
+            list.iter().map(|b| b.modified).collect::<Vec<_>>(),
+            before,
+            "시각은 그대로"
+        );
+        let opens = |pw: &str| {
+            list.iter()
+                .filter(|b| OpenVault::open(Path::new(&b.path), pw).is_ok())
+                .count()
+        };
+        assert_eq!(opens("random-secret"), 0);
+        assert_eq!(opens("master two"), 1);
+        assert!(opens("master one") >= 1, "끄기 전 백업은 그때 비밀번호로 남는다");
+    }
+
+    #[test]
     fn backups_are_pruned() {
         let path = tmp_path("vault.sshv");
         let v = OpenVault::create(&path, "correct horse", FAST).unwrap();
@@ -613,25 +678,6 @@ mod tests {
         }
         assert_eq!(backup::list(&path).len(), backup::KEEP);
         drop(v);
-    }
-
-    #[test]
-    fn open_with_remembered_key() {
-        let path = tmp_path("vault.sshv");
-        let mut v = OpenVault::create(&path, "correct horse", FAST).unwrap();
-        v.data.sessions.push(sample_session("s1"));
-        v.save().unwrap();
-        let key = v.key().to_vec();
-
-        let again = OpenVault::open_with_key(&path, &key).unwrap();
-        assert_eq!(again.data.sessions.len(), 1);
-        assert!(OpenVault::open_with_key(&path, &[0u8; 32]).is_err());
-        assert!(OpenVault::open_with_key(&path, &key[..10]).is_err());
-
-        // 비밀번호를 바꾸면 기억해 둔 옛 키로는 열리지 않는다.
-        v.change_password("battery staple").unwrap();
-        assert!(OpenVault::open_with_key(&path, &key).is_err());
-        assert!(OpenVault::open_with_key(&path, v.key()).is_ok());
     }
 
     #[test]

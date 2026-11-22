@@ -3,13 +3,12 @@ import { api, errorText, type VaultBackup, type VaultStatus } from "../lib/api";
 import { pickVaultToImport } from "../lib/dialogs";
 import { passwordStrength } from "../lib/passwordStrength";
 import { IconLock } from "./Icons";
+import { Splash } from "./Splash";
 import { StrengthMeter } from "./StrengthMeter";
 
 interface Props {
   status: VaultStatus;
-  onOpened: () => void;
-  /** 앱을 막 켰을 때만 true. 키체인에 기억된 키가 있으면 바로 연다(잠근 뒤에는 자동으로 열지 않는다). */
-  autoUnlock: boolean;
+  onOpened: () => void | Promise<void>;
 }
 
 type Mode = "unlock" | "create" | "import" | "restore";
@@ -18,14 +17,13 @@ const dateFmt = new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyl
 const MIN_LEN = 8;
 
 /** 보관함이 없으면 만들기, 있으면 잠금 해제. 다른 PC의 보관함 파일을 가져올 수도 있다. */
-export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
+export function VaultScreen({ status, onOpened }: Props) {
   const [mode, setMode] = useState<Mode>(status.exists ? "unlock" : "create");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [importPath, setImportPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [remember, setRemember] = useState(status.remembered);
   const [backups, setBackups] = useState<VaultBackup[] | null>(null);
   const [chosen, setChosen] = useState("");
 
@@ -42,18 +40,26 @@ export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
     }
   };
 
-  const unlockRemembered = () => run(() => api.vaultUnlockRemembered());
+  // 마스터 비밀번호 없이 쓰는 중이면 잠금 화면 없이 로고만 보여 주며 바로 연다.
+  const [autoOpening, setAutoOpening] = useState(status.exists && status.passwordless);
   const tried = useRef(false);
   useEffect(() => {
-    if (autoUnlock && status.exists && status.remembered && !tried.current) {
-      tried.current = true;
-      void unlockRemembered();
-    }
+    if (!autoOpening || tried.current) return;
+    tried.current = true;
+    void (async () => {
+      try {
+        await api.vaultUnlockAuto();
+        await onOpened(); // 성공하면 이 화면이 사라질 때까지 로고를 유지한다.
+      } catch (e) {
+        setError(errorText(e));
+        setAutoOpening(false);
+      }
+    })();
   }, []);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (mode === "unlock") return run(() => api.vaultUnlock(password, remember));
+    if (mode === "unlock") return run(() => api.vaultUnlock(password));
     if (mode === "create") {
       if (password.length < MIN_LEN) return setError(`마스터 비밀번호는 ${MIN_LEN}자 이상이어야 합니다.`);
       if (passwordStrength(password).score === 0) return setError("비밀번호가 너무 약합니다. 더 길게 하거나 흔한 단어를 빼세요.");
@@ -94,6 +100,8 @@ export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
         ? "세션과 키를 담을 보관함을 만듭니다. 이 파일과 마스터 비밀번호만 있으면 다른 PC에서도 열 수 있습니다."
         : "다른 PC에서 내보낸 보관함 파일을 고르고, 그 보관함의 마스터 비밀번호를 입력하세요.";
 
+  if (autoOpening) return <Splash />;
+
   return (
     <div className="vault-screen">
       <form className="vault-card" onSubmit={submit}>
@@ -129,7 +137,7 @@ export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
         )}
 
         <label className="field">
-          <span>{mode === "restore" ? "그 백업의 마스터 비밀번호" : "마스터 비밀번호"}</span>
+          <span>{mode === "restore" ? (status.passwordless ? "그 백업의 마스터 비밀번호 (비밀번호 없이 쓸 때 만든 백업은 비워 두기)" : "그 백업의 마스터 비밀번호") : "마스터 비밀번호"}</span>
           <input className="input" type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
         </label>
         {mode === "create" && <StrengthMeter password={password} />}
@@ -139,26 +147,11 @@ export function VaultScreen({ status, onOpened, autoUnlock }: Props) {
             <input className="input" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
           </label>
         )}
-        {mode === "unlock" && (
-          <label className="check">
-            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-            <span>
-              이 PC에서 기억하기
-              <br />
-              <span className="hint">다음부터 OS 키체인으로 바로 엽니다. 다른 사람과 같이 쓰는 PC에서는 끄세요.</span>
-            </span>
-          </label>
-        )}
         {error && <p className="error" role="alert">{error}</p>}
 
         <button className="btn primary" style={{ height: 42 }} disabled={busy}>
           {mode === "unlock" ? "잠금 해제" : mode === "create" ? "만들기" : mode === "restore" ? "되돌리고 열기" : "가져와서 열기"}
         </button>
-        {mode === "unlock" && status.remembered && (
-          <button type="button" className="btn" style={{ height: 42 }} disabled={busy} onClick={() => void unlockRemembered()}>
-            이 PC에 기억된 키로 열기
-          </button>
-        )}
 
         {mode === "create" && <p className="hint">마스터 비밀번호는 어디에도 보내지 않고 복구할 수도 없습니다. 잊어버리면 보관함을 열 수 없습니다.</p>}
         {(mode === "import" || mode === "restore") && status.exists && <p className="hint">지금 PC의 보관함은 같은 폴더에 .bak 파일로 남겨 둡니다.</p>}

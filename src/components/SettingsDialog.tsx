@@ -16,8 +16,9 @@ import {
 import type { ThemeName } from "../lib/theme";
 import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
-import { IconClose } from "./Icons";
+import { IconClose, IconExport, IconUnlock } from "./Icons";
 import { KnownHostsDialog } from "./KnownHostsDialog";
+import { PasswordModeDialog } from "./PasswordModeDialog";
 
 export function useSettings() {
   return useSyncExternalStore(subscribeSettings, getSettings);
@@ -26,13 +27,18 @@ export function useSettings() {
 interface Props {
   theme: ThemeName;
   onTheme: (t: ThemeName) => void;
-  /** 이 PC의 키체인에 보관함 키를 기억해 두었는지 */
-  remembered: boolean;
-  onRemember: (on: boolean) => void;
   /** 세션 기록 폴더 열기 */
   onOpenLogs: () => void;
   /** 화면 아래에 잠깐 보여 줄 알림 */
   onNotice: (message: string) => void;
+  /** 마스터 비밀번호 없이 쓰는 중인지 */
+  passwordless: boolean;
+  /** 비밀번호 사용을 켜거나 껐을 때 상태를 다시 읽는다 */
+  onVaultChanged: () => void | Promise<void>;
+  /** 보관함 파일 내보내기. password는 비밀번호 없이 쓰는 중일 때 내보낼 파일의 비밀번호 */
+  onExport: (password?: string) => void;
+  /** 보관함 잠그기 */
+  onLock: () => void;
   onClose: () => void;
 }
 
@@ -68,8 +74,8 @@ const SHORTCUTS: [string, string][] = [
 const CUSTOM = "__custom__";
 
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
-export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenLogs, onNotice, onClose }: Props) {
-  const [sub, setSub] = useState<"password" | "hosts" | null>(null);
+export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, onClose }: Props) {
+  const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | null>(null);
   const s = useSettings();
   const installed = useMemo(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])), []);
   const isPreset = s.fontFamily === "" || FONT_PRESETS.includes(s.fontFamily);
@@ -99,6 +105,25 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
         </div>
 
         <div className="dialog-body">
+          <section className="settings-section">
+            <h3>보관함</h3>
+            <div className="row-gap" style={{ alignItems: "center" }}>
+              <IconUnlock style={{ color: "var(--ok)", flex: "none" }} />
+              <span style={{ flex: 1, fontWeight: 500 }}>{passwordless ? "비밀번호 없이 사용 중" : "열려 있음"}</span>
+              <button className="btn" title="다른 PC로 옮길 보관함 파일 내보내기" onClick={() => (passwordless ? setSub("export") : onExport())}>
+                <IconExport width={14} height={14} /> 내보내기
+              </button>
+              {!passwordless && (
+                <button className="btn" onClick={onLock}>
+                  잠그기
+                </button>
+              )}
+            </div>
+            <span className="hint">
+              {passwordless ? "앱을 켜면 이 PC의 열쇠 파일로 바로 열립니다. 내 계정으로 도는 프로그램도 읽을 수 있으니 FileVault를 켜 두세요." : "잠그면 열린 연결도 모두 끊깁니다."}
+            </span>
+          </section>
+
           <section className="settings-section">
             <h3>터미널 글꼴</h3>
             <div className="grid-font">
@@ -210,6 +235,7 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
 
           <section className="settings-section">
             <h3>보안</h3>
+            {!passwordless && (
             <label className="field">
               <span>자동 잠금</span>
               <select className="input" value={s.autoLockMinutes} onChange={(e) => updateSettings({ autoLockMinutes: Number(e.target.value) })}>
@@ -221,24 +247,26 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
               </select>
               <span className="hint">잠그면 열린 연결도 모두 끊깁니다.</span>
             </label>
+            )}
             <div className="row-gap">
-              <button className="btn" onClick={() => setSub("password")}>
-                마스터 비밀번호 바꾸기
-              </button>
+              {passwordless ? (
+                <button className="btn" onClick={() => setSub("enable")}>
+                  마스터 비밀번호 켜기
+                </button>
+              ) : (
+                <>
+                  <button className="btn" onClick={() => setSub("password")}>
+                    마스터 비밀번호 바꾸기
+                  </button>
+                  <button className="btn" onClick={() => setSub("disable")}>
+                    마스터 비밀번호 끄기
+                  </button>
+                </>
+              )}
               <button className="btn" onClick={() => setSub("hosts")}>
                 알려진 서버 관리
               </button>
             </div>
-            <label className="check">
-              <input type="checkbox" checked={remembered} onChange={(e) => onRemember(e.target.checked)} />
-              <span>
-                이 PC에서 기억하기
-                <br />
-                <span className="hint">
-                  {isMac ? "macOS 키체인" : "Windows 자격 증명 관리자"}에 보관함 키를 두고, 앱을 켤 때 마스터 비밀번호 없이 엽니다.
-                </span>
-              </span>
-            </label>
           </section>
 
           <section className="settings-section">
@@ -294,6 +322,18 @@ export function SettingsDialog({ theme, onTheme, remembered, onRemember, onOpenL
         />
       )}
       {sub === "hosts" && <KnownHostsDialog onClose={() => setSub(null)} />}
+      {(sub === "disable" || sub === "enable" || sub === "export") && (
+        <PasswordModeDialog
+          mode={sub}
+          onClose={() => setSub(null)}
+          onDone={async (pw) => {
+            setSub(null);
+            if (sub === "export") return onExport(pw);
+            await onVaultChanged();
+            onNotice(sub === "disable" ? "마스터 비밀번호를 껐습니다. 다음부터 바로 열립니다." : "마스터 비밀번호를 켰습니다.");
+          }}
+        />
+      )}
     </div>
   );
 }

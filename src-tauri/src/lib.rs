@@ -3,7 +3,7 @@ mod forward;
 mod fsperm;
 #[cfg(test)]
 mod it_tests;
-mod keychain;
+mod nopass;
 mod pty;
 mod sftp;
 mod ssh;
@@ -63,8 +63,8 @@ struct VaultStatus {
     exists: bool,
     unlocked: bool,
     path: String,
-    /// 이 PC의 키체인에 보관함 키를 기억해 두었는지
-    remembered: bool,
+    /// 마스터 비밀번호 없이 쓰는 중(이 PC의 열쇠 파일로 연다)
+    passwordless: bool,
 }
 
 #[tauri::command]
@@ -73,8 +73,8 @@ fn vault_status(app: AppHandle, state: State<'_, AppState>) -> CmdResult<VaultSt
     Ok(VaultStatus {
         exists: path.exists(),
         unlocked: lock(&state.vault).is_some(),
+        passwordless: nopass::is_on(&path),
         path: path.display().to_string(),
-        remembered: keychain::load().is_some(),
     })
 }
 
@@ -84,19 +84,15 @@ async fn vault_create(app: AppHandle, state: State<'_, AppState>, password: Stri
     if password.chars().count() < 8 {
         return Err("마스터 비밀번호는 8자 이상이어야 합니다.".into());
     }
-    let v = OpenVault::create(&vault_path(&app)?, &password, KdfParams::DEFAULT).map_err(|e| e.to_string())?;
+    let path = vault_path(&app)?;
+    let v = OpenVault::create(&path, &password, KdfParams::DEFAULT).map_err(|e| e.to_string())?;
+    let _ = nopass::remove(&path);
     *lock(&state.vault) = Some(v);
     Ok(())
 }
 
-/// remember가 true면 열린 보관함의 키를 이 PC의 키체인에 기억해 둔다.
 #[tauri::command]
-async fn vault_unlock(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    password: String,
-    remember: Option<bool>,
-) -> CmdResult<()> {
+async fn vault_unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> CmdResult<()> {
     let path = vault_path(&app)?;
     let v = OpenVault::open(&path, &password).map_err(|e| {
         applog::warn(&format!("보관함을 열지 못함: {e}"));
@@ -104,42 +100,61 @@ async fn vault_unlock(
     })?;
     // 예전 버전이 만든 보관함(0644)도 내 계정만 읽게 맞춘다.
     let _ = fsperm::fix_mode(&path);
-    if remember == Some(true) {
-        keychain::store(v.key())?;
-    }
+    // 직접 입력한 비밀번호로 열렸다면 남아 있는 열쇠 파일은 이 보관함과 맞지 않는 것이다.
+    nopass::retire(&path);
     *lock(&state.vault) = Some(v);
     Ok(())
 }
 
-/// 키체인에 기억해 둔 키로 연다. 비밀번호가 바뀌었거나 다른 보관함을 가져왔으면 기억을 지운다.
+/// 마스터 비밀번호 없이 쓰는 경우: 이 PC의 열쇠 파일로 연다.
 #[tauri::command]
-async fn vault_unlock_remembered(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    let key = keychain::load().ok_or("이 PC에 기억된 보관함 키가 없습니다.")?;
-    match OpenVault::open_with_key(&vault_path(&app)?, &key) {
-        Ok(v) => {
-            *lock(&state.vault) = Some(v);
-            Ok(())
-        }
-        Err(vault::VaultError::Decrypt) => {
-            keychain::forget();
-            Err(
-                "기억해 둔 키로 열리지 않습니다(마스터 비밀번호가 바뀌었을 수 있습니다). 비밀번호로 열어 주세요."
-                    .into(),
-            )
-        }
-        Err(e) => Err(e.to_string()),
-    }
+async fn vault_unlock_auto(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let path = vault_path(&app)?;
+    let secret = nopass::load(&path).ok_or("이 PC의 열쇠 파일이 없습니다. 마스터 비밀번호로 여세요.")?;
+    let v = OpenVault::open(&path, &secret).map_err(|e| {
+        applog::warn(&format!("열쇠 파일로 보관함을 열지 못함: {e}"));
+        format!("열쇠 파일로 열지 못했습니다: {e}")
+    })?;
+    *lock(&state.vault) = Some(v);
+    Ok(())
 }
 
-/// 설정에서 "이 PC에서 기억하기"를 켜고 끈다.
+/// 마스터 비밀번호 끄기: 지금 비밀번호를 확인하고, 임의의 비밀번호로 다시 잠근 뒤 열쇠 파일에 둔다.
 #[tauri::command]
-fn vault_remember(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
-    if !on {
-        keychain::forget();
-        return Ok(());
+async fn vault_disable_password(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let path = v.path().to_path_buf();
+    if nopass::is_on(&path) {
+        return Err("이미 마스터 비밀번호 없이 쓰고 있습니다.".into());
     }
-    let guard = lock(&state.vault);
-    keychain::store(guard.as_ref().ok_or(LOCKED)?.key())
+    OpenVault::open(&path, &password).map_err(|_| "지금 마스터 비밀번호가 맞지 않습니다.".to_string())?;
+    let secret = nopass::generate()?;
+    // 열쇠를 먼저 저장한다. 여기서 멈춰도 보관함은 아직 마스터 비밀번호로 열린다.
+    nopass::save(&path, &secret).map_err(|e| format!("열쇠 파일을 만들지 못했습니다: {e}"))?;
+    if let Err(e) = v.change_password(&secret) {
+        let _ = nopass::remove(&path);
+        return Err(e.to_string());
+    }
+    applog::info("마스터 비밀번호를 껐습니다");
+    Ok(())
+}
+
+/// 마스터 비밀번호 다시 켜기: 보관함과, 끈 동안 생긴 백업을 새 비밀번호로 잠그고 열쇠 파일을 지운다.
+#[tauri::command]
+async fn vault_enable_password(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    if password.chars().count() < 8 {
+        return Err("마스터 비밀번호는 8자 이상이어야 합니다.".into());
+    }
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let path = v.path().to_path_buf();
+    let old = nopass::load(&path).ok_or("이미 마스터 비밀번호를 쓰고 있습니다.")?;
+    v.change_password(&password).map_err(|e| e.to_string())?;
+    vault::backup::rekey(&path, &old, &password);
+    nopass::remove(&path).map_err(|e| format!("열쇠 파일을 지우지 못했습니다: {e}"))?;
+    applog::info("마스터 비밀번호를 켰습니다");
+    Ok(())
 }
 
 #[tauri::command]
@@ -163,30 +178,32 @@ async fn vault_change_password(
     }
     let mut guard = lock(&state.vault);
     let v = guard.as_mut().ok_or(LOCKED)?;
-    OpenVault::open(v.path(), &old_password).map_err(|_| "지금 마스터 비밀번호가 맞지 않습니다.".to_string())?;
-    v.change_password(&new_password).map_err(|e| e.to_string())?;
-    // 기억해 둔 키가 있으면 새 키로 바꿔 둔다.
-    if keychain::load().is_some() {
-        keychain::store(v.key())?;
+    if nopass::is_on(v.path()) {
+        return Err("마스터 비밀번호 없이 쓰는 중입니다. 먼저 마스터 비밀번호를 켜세요.".into());
     }
-    Ok(())
+    OpenVault::open(v.path(), &old_password).map_err(|_| "지금 마스터 비밀번호가 맞지 않습니다.".to_string())?;
+    v.change_password(&new_password).map_err(|e| e.to_string())
 }
 
+/// 보관함 파일 내보내기. 마스터 비밀번호 없이 쓰는 중이면 내보낼 파일의 비밀번호가 필요하다.
 #[tauri::command]
-fn vault_export(state: State<'_, AppState>, dest: String) -> CmdResult<()> {
+async fn vault_export(state: State<'_, AppState>, dest: String, password: Option<String>) -> CmdResult<()> {
     let guard = lock(&state.vault);
-    guard
-        .as_ref()
-        .ok_or(LOCKED)?
-        .export_to(&PathBuf::from(dest))
-        .map_err(|e| e.to_string())
+    let v = guard.as_ref().ok_or(LOCKED)?;
+    let dest = PathBuf::from(dest);
+    if nopass::is_on(v.path()) {
+        let pw = password.filter(|p| p.chars().count() >= 8);
+        let pw = pw.ok_or("내보낼 파일의 비밀번호(8자 이상)가 필요합니다.")?;
+        return v.export_with_password(&dest, &pw).map_err(|e| e.to_string());
+    }
+    v.export_to(&dest).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn vault_import(app: AppHandle, state: State<'_, AppState>, src: String, password: String) -> CmdResult<()> {
-    let v = vault::import(&PathBuf::from(src), &vault_path(&app)?, &password).map_err(|e| e.to_string())?;
-    // 다른 보관함이 됐으므로 예전 기억은 쓸모없다.
-    keychain::forget();
+    let dest = vault_path(&app)?;
+    let v = vault::import(&PathBuf::from(src), &dest, &password).map_err(|e| e.to_string())?;
+    nopass::retire(&dest);
     *lock(&state.vault) = Some(v);
     Ok(())
 }
@@ -668,8 +685,15 @@ async fn vault_restore(app: AppHandle, state: State<'_, AppState>, backup: Strin
     if !vault::backup::is_backup_of(&dest, &src) {
         return Err("보관함 백업 폴더의 파일이 아닙니다.".into());
     }
-    let v = vault::import(&src, &dest, &password).map_err(|e| e.to_string())?;
-    keychain::forget();
+    // 마스터 비밀번호 없이 쓰는 중이면 비워 둔 칸은 이 PC의 열쇠로 연다.
+    let v = match (password.is_empty(), nopass::load(&dest)) {
+        (true, Some(secret)) => vault::import(&src, &dest, &secret).map_err(|e| e.to_string())?,
+        _ => {
+            let v = vault::import(&src, &dest, &password).map_err(|e| e.to_string())?;
+            nopass::retire(&dest);
+            v
+        }
+    };
     applog::info(&format!("보관함을 백업에서 되돌림: {backup}"));
     *lock(&state.vault) = Some(v);
     Ok(())
@@ -881,8 +905,9 @@ pub fn run() {
             vault_status,
             vault_create,
             vault_unlock,
-            vault_unlock_remembered,
-            vault_remember,
+            vault_unlock_auto,
+            vault_disable_password,
+            vault_enable_password,
             vault_lock,
             vault_change_password,
             vault_export,

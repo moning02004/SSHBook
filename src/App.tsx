@@ -11,6 +11,7 @@ import { SnippetsDialog } from "./components/SnippetsDialog";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { checkForUpdate } from "./lib/updater";
 import { Sidebar } from "./components/Sidebar";
+import { Splash } from "./components/Splash";
 import { VaultScreen } from "./components/VaultScreen";
 import { tabTitle, Workspace, type PaneInfo } from "./components/Workspace";
 import { api, errorText, inTauri, type SecretInput, type VaultStatus } from "./lib/api";
@@ -126,8 +127,6 @@ export function App() {
   const [restoreOffer, setRestoreOffer] = useState<desks.SavedWorkspace | null>(null);
   const [sftpPanes, setSftpPanes] = useState<Set<string>>(() => new Set());
   const [snippets, setSnippets] = useState<Snippet[] | null>(null);
-  // 앱을 막 켰을 때만 키체인으로 자동으로 연다. 한 번 잠그면 그다음엔 직접 연다.
-  const firstLaunch = useRef(true);
   // 창의 연결 상태가 바뀌면 다시 그린다(탭·사이드바의 상태 점).
   useSyncExternalStore(terms.subscribeStatus, terms.statusSnapshot);
 
@@ -165,8 +164,9 @@ export function App() {
 
   const refresh = useCallback(async () => {
     const st = await api.vaultStatus();
-    setStatus(st);
+    // 세션 목록까지 받은 뒤 화면을 바꿔서, 빈 목록이 잠깐 보이지 않게 한다.
     if (st.unlocked) setSessions(await api.sessionsList());
+    setStatus(st);
   }, []);
   useEffect(() => void refresh(), [refresh]);
 
@@ -598,7 +598,6 @@ export function App() {
   const reallyLock = async () => {
     // 잠그면서 화면을 비우는 것은 '모든 탭을 닫은 것'이 아니므로 저장해 둔 배치를 지우지 않는다.
     skipSave.current = true;
-    firstLaunch.current = false;
     setEditing(null);
     setPicker(false);
     setSnippets(null);
@@ -614,11 +613,11 @@ export function App() {
     await refresh();
   };
 
-  const exportVault = async () => {
+  const exportVault = async (password?: string) => {
     try {
       const dest = await pickExportPath();
       if (!dest) return;
-      await api.vaultExport(dest);
+      await api.vaultExport(dest, password);
       setNotice(`보관함 파일을 내보냈습니다: ${dest}`);
     } catch (e) {
       setNotice(`내보내지 못했습니다: ${errorText(e)}`);
@@ -637,22 +636,14 @@ export function App() {
   }, []);
   useEffect(() => {
     const minutes = settings.autoLockMinutes;
-    if (!minutes || !status?.unlocked) return;
+    // 마스터 비밀번호 없이 쓰면 잠가도 바로 열리므로 자동 잠금을 쓰지 않는다.
+    if (!minutes || !status?.unlocked || status.passwordless) return;
     lastInput.current = Date.now();
     const t = setInterval(() => {
       if (Date.now() - lastInput.current >= minutes * 60_000) void lockRef.current();
     }, 15_000);
     return () => clearInterval(t);
-  }, [settings.autoLockMinutes, status?.unlocked]);
-
-  const setRemember = async (on: boolean) => {
-    try {
-      await api.vaultRemember(on);
-      setStatus(await api.vaultStatus());
-    } catch (e) {
-      setNotice(errorText(e));
-    }
-  };
+  }, [settings.autoLockMinutes, status?.unlocked, status?.passwordless]);
 
   const openLogs = async () => {
     try {
@@ -719,8 +710,8 @@ export function App() {
 
   // ---- 화면 ----
 
-  if (!status) return null;
-  if (!status.unlocked) return <VaultScreen status={status} onOpened={refresh} autoUnlock={firstLaunch.current} />;
+  if (!status) return <Splash />;
+  if (!status.unlocked) return <VaultScreen status={status} onOpened={refresh} />;
 
   const activeInfo = activeId ? panes[activeId] : null;
 
@@ -773,8 +764,6 @@ export function App() {
             onOpen={(s) => openTab(s.id)}
             onEdit={(s) => setEditing({ session: s })}
             onNew={() => setEditing({ session: null })}
-            onLock={lock}
-            onExport={exportVault}
             onRenameGroup={async (from, to) => {
               try {
                 await api.sessionsRenameGroup(from, to);
@@ -913,10 +902,16 @@ export function App() {
         <SettingsDialog
           theme={theme}
           onTheme={setTheme}
-          remembered={status.remembered}
-          onRemember={(on) => void setRemember(on)}
           onOpenLogs={() => void openLogs()}
           onNotice={setNotice}
+          passwordless={status.passwordless}
+          onVaultChanged={refresh}
+          onExport={(pw) => void exportVault(pw)}
+          onLock={() => {
+            // 연결된 탭이 있으면 묻는 창이 설정에 가리지 않게 먼저 닫는다.
+            setShowSettings(false);
+            lock();
+          }}
           onClose={() => setShowSettings(false)}
         />
       )}

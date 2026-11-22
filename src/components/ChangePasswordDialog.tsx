@@ -9,7 +9,7 @@ interface Props {
   onClose: () => void;
 }
 
-/** 마스터 비밀번호 바꾸기. 이 PC에서 기억하기가 켜져 있으면 새 키로 함께 바뀐다. */
+/** 마스터 비밀번호 바꾸기 */
 export function ChangePasswordDialog({ onDone, onClose }: Props) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");

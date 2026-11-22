@@ -35,8 +35,6 @@ tokio = { version = "1.54.1", features = ["sync", "rt", "macros", "time", "net",
 # 원격 폴더 보기·파일 주고받기
 # (russh-sftp는 위 russh와 상관없이 채널 스트림 위에서 돈다)
 russh-sftp = "3.0.1"
-# 이 PC에서 기억하기: 보관함 키를 OS 키체인(macOS 키체인, Windows 자격 증명 관리자)에 둔다.
-keyring = { version = "3", features = ["apple-native", "windows-native"] }
 # 세션 기록 파일의 시각
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 

@@ -12,8 +12,8 @@ export interface VaultStatus {
   exists: boolean;
   unlocked: boolean;
   path: string;
-  /** 이 PC의 키체인에 보관함 키를 기억해 두었는지 */
-  remembered: boolean;
+  /** 마스터 비밀번호 없이 쓰는 중(이 PC의 열쇠 파일로 연다) */
+  passwordless: boolean;
 }
 
 export interface RemoteEntry {
@@ -115,12 +115,15 @@ export function parseOpenError(e: unknown): { hostKey: HostKeyPrompt } | { ask: 
 export interface Backend {
   vaultStatus(): Promise<VaultStatus>;
   vaultCreate(password: string): Promise<void>;
-  vaultUnlock(password: string, remember?: boolean): Promise<void>;
-  vaultUnlockRemembered(): Promise<void>;
-  vaultRemember(on: boolean): Promise<void>;
+  vaultUnlock(password: string): Promise<void>;
+  /** 마스터 비밀번호 없이 쓰는 경우 열쇠 파일로 연다 */
+  vaultUnlockAuto(): Promise<void>;
+  vaultDisablePassword(password: string): Promise<void>;
+  vaultEnablePassword(password: string): Promise<void>;
   vaultLock(): Promise<void>;
   vaultChangePassword(oldPassword: string, newPassword: string): Promise<void>;
-  vaultExport(dest: string): Promise<void>;
+  /** password: 마스터 비밀번호 없이 쓰는 중일 때 내보낼 파일의 비밀번호 */
+  vaultExport(dest: string, password?: string): Promise<void>;
   vaultImport(src: string, password: string): Promise<void>;
   /** 보관함 자동 백업 목록(새것부터) */
   vaultBackups(): Promise<VaultBackup[]>;
@@ -169,12 +172,13 @@ export interface Backend {
 const tauriBackend: Backend = {
   vaultStatus: () => invoke("vault_status"),
   vaultCreate: (password) => invoke("vault_create", { password }),
-  vaultUnlock: (password, remember) => invoke("vault_unlock", { password, remember: remember ?? false }),
-  vaultUnlockRemembered: () => invoke("vault_unlock_remembered"),
-  vaultRemember: (on) => invoke("vault_remember", { on }),
+  vaultUnlock: (password) => invoke("vault_unlock", { password }),
+  vaultUnlockAuto: () => invoke("vault_unlock_auto"),
+  vaultDisablePassword: (password) => invoke("vault_disable_password", { password }),
+  vaultEnablePassword: (password) => invoke("vault_enable_password", { password }),
   vaultLock: () => invoke("vault_lock"),
   vaultChangePassword: (oldPassword, newPassword) => invoke("vault_change_password", { oldPassword, newPassword }),
-  vaultExport: (dest) => invoke("vault_export", { dest }),
+  vaultExport: (dest, password) => invoke("vault_export", { dest, password: password ?? null }),
   vaultImport: (src, password) => invoke("vault_import", { src, password }),
   vaultBackups: () => invoke("vault_backups"),
   vaultRestore: (backup, password) => invoke("vault_restore", { backup, password }),
@@ -215,7 +219,7 @@ const tauriBackend: Backend = {
 function createMockBackend(): Backend {
   let exists = false;
   let unlocked = false;
-  let remembered = false;
+  let passwordless = false;
   let snippets: Snippet[] = [
     { id: "s1", name: "도커 로그", command: "docker compose logs -f --tail=200 api" },
     { id: "s2", name: "디스크 사용량", command: "df -h" },
@@ -269,26 +273,31 @@ function createMockBackend(): Backend {
 
   return {
     async vaultStatus() {
-      return { exists, unlocked, path: "(브라우저 미리보기 — 저장하지 않음)", remembered };
+      return { exists, unlocked, path: "(브라우저 미리보기 — 저장하지 않음)", passwordless };
     },
     async vaultCreate() {
       await wait();
       exists = true;
       unlocked = true;
     },
-    async vaultUnlock(password, remember) {
+    async vaultUnlock(password) {
       await wait();
       if (!password) throw "마스터 비밀번호가 맞지 않습니다.";
       unlocked = true;
-      if (remember) remembered = true;
     },
-    async vaultUnlockRemembered() {
+    async vaultUnlockAuto() {
       await wait();
-      if (!remembered) throw "이 PC에 기억된 보관함 키가 없습니다.";
+      if (!passwordless) throw "이 PC의 열쇠 파일이 없습니다.";
       unlocked = true;
     },
-    async vaultRemember(on) {
-      remembered = on;
+    async vaultDisablePassword(password) {
+      await wait();
+      if (!password) throw "지금 마스터 비밀번호가 맞지 않습니다.";
+      passwordless = true;
+    },
+    async vaultEnablePassword() {
+      await wait();
+      passwordless = false;
     },
     async vaultLock() {
       unlocked = false;

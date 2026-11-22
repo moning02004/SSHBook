@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { authLabel, describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Session } from "../lib/sessions";
-import { IconEdit, IconExport, IconPlus, IconSearch, IconUnlock } from "./Icons";
+import { IconEdit, IconPlus, IconSearch } from "./Icons";
 
 interface Props {
   sessions: Session[];
@@ -10,13 +10,11 @@ interface Props {
   onOpen: (s: Session) => void;
   onEdit: (s: Session) => void;
   onNew: () => void;
-  onLock: () => void;
-  onExport: () => void;
   /** 그룹 이름 바꾸기(빈 이름이면 그룹 없음으로) */
   onRenameGroup: (from: string, to: string) => void;
 }
 
-export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew, onLock, onExport, onRenameGroup }: Props) {
+export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew, onRenameGroup }: Props) {
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const sections = useMemo(() => groupSessions(filterSessions(sessions, query)), [sessions, query]);
@@ -86,17 +84,6 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
           </div>
         ))}
       </nav>
-
-      <div className="vault-bar">
-        <IconUnlock style={{ color: "var(--ok)" }} />
-        <span style={{ flex: 1, fontSize: 12, fontWeight: 500 }}>보관함 열림</span>
-        <button className="icon-btn ghost" aria-label="보관함 파일 내보내기" title="보관함 파일 내보내기 (다른 PC로 옮기기)" onClick={onExport}>
-          <IconExport />
-        </button>
-        <button className="btn subtle" onClick={onLock}>
-          잠그기
-        </button>
-      </div>
     </aside>
   );
 }
