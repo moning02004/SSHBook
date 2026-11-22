@@ -6,3 +6,4 @@ UsePAM no
 AllowTcpForwarding yes
 GatewayPorts no
 Subsystem sftp /usr/lib/ssh/sftp-server
+MaxStartups 200

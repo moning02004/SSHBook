@@ -331,6 +331,11 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                     </button>
                   </div>
                   <span className="hint">로컬: 내 PC 포트 → 서버에서 본 목적지 · 원격: 서버 포트 → 내 PC에서 본 목적지 · SOCKS: 내 PC 포트에 프록시</span>
+                  {forwards.length > 0 && (
+                    <span className="hint">
+                      포워딩은 이 PC(127.0.0.1)에서만 열리지만 인증은 없습니다. 연결된 동안 이 PC의 다른 프로그램이나 브라우저 페이지도 그 포트에 닿을 수 있으니, 관리 화면·DB처럼 민감한 곳은 쓸 때만 켜 두세요.
+                    </span>
+                  )}
                 </div>
 
                 <label className="check">

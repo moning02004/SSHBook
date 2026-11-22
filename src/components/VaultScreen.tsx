@@ -32,7 +32,10 @@ export function VaultScreen({ status, onOpened }: Props) {
     setError("");
     try {
       await fn();
-      onOpened();
+      // 입력한 비밀번호를 화면 상태에 남기지 않는다.
+      setPassword("");
+      setConfirm("");
+      await onOpened();
     } catch (e) {
       setError(errorText(e));
     } finally {

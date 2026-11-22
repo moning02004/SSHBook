@@ -6,6 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
 import { api, parseOpenError, type OpenOptions } from "./api";
+import { pasteWarning, sanitizePaste } from "./paste";
 import { fontStack, getSettings, subscribeSettings, type Settings } from "./settings";
 import { terminalThemes, type ThemeName } from "./theme";
 
@@ -49,6 +50,8 @@ export interface PaneEntry {
   /** 연결돼 있는 동안의 백엔드 터미널 id (동시 입력·파일 창에서 바로 쓴다) */
   liveId: string | null;
   search: SearchAddon;
+  /** 터미널에서 입력을 기다리는 중이면 그 입력을 취소한다(창을 닫거나 잠글 때) */
+  cancelPrompt: (() => void) | null;
   /** 서버 응답 시간(ms). SSH만, 모르면 null */
   latency: number | null;
 }
@@ -154,22 +157,29 @@ const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 
 /** 터미널 안에서 한 줄을 입력받는다. hidden이면 글자를 보여 주지 않는다. Ctrl+C·Esc는 취소(null). */
-function readLine(term: Terminal, prompt: string, hidden: boolean): Promise<string | null> {
+function readLine(entry: PaneEntry, prompt: string, hidden: boolean, typedOnly = false): Promise<string | null> {
+  const { term } = entry;
   term.write(prompt);
   term.focus();
   return new Promise((resolve) => {
     let value = "";
+    const finish = (v: string | null) => {
+      sub.dispose();
+      entry.cancelPrompt = null;
+      resolve(v);
+    };
+    entry.cancelPrompt = () => finish(null);
     const sub = term.onData((d) => {
+      // 호스트 키 확인은 붙여넣기로 넘어가지 못하게 한 글자씩 친 것만 받는다.
+      if (typedOnly && d.length > 1) return;
       for (const ch of d) {
         if (ch === "\r" || ch === "\n") {
-          sub.dispose();
           term.write("\r\n");
-          return resolve(value);
+          return finish(value);
         }
         if (ch === "\x03" || ch === "\x1b") {
-          sub.dispose();
           term.write("^C\r\n");
-          return resolve(null);
+          return finish(null);
         }
         if (ch === "\x7f" || ch === "\b") {
           if (value) {
@@ -199,9 +209,14 @@ async function connect(entry: PaneEntry): Promise<string | null> {
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
       const id = await api.termOpen(sessionId, term.cols, term.rows, opts);
+      // 다시 물어본 비밀번호는 더 들고 있지 않는다.
+      opts.password = undefined;
+      opts.passphrase = undefined;
       bind(id, entry);
       return id;
     } catch (err) {
+      // 기다리는 사이에 창을 닫았거나 보관함을 잠갔으면 더 묻지 않는다.
+      if (entries.get(entry.paneId) !== entry) return null;
       const r = parseOpenError(err);
       if ("hostKey" in r) {
         const k = r.hostKey;
@@ -214,16 +229,24 @@ async function connect(entry: PaneEntry): Promise<string | null> {
           term.write(`처음 연결하는 서버입니다: ${k.hostId}\r\n`);
         }
         term.write(`${DIM}${k.algorithm} 키 지문${RESET} ${k.fingerprint}\r\n`);
-        const q = k.kind === "changed" ? "새 키로 바꾸고 연결할까요? (yes/no) " : "이 서버를 신뢰하고 연결할까요? (yes/no) ";
-        const ans = (await readLine(term, q, false))?.trim().toLowerCase();
-        if (ans !== "yes" && ans !== "y") return fail(entry, "연결을 취소했습니다.");
-        await api.hostTrust(k.hostId);
+        // 키가 바뀐 경우는 중간자 공격일 수 있어서, 지문을 직접 보고 치게 한다.
+        const code = k.fingerprint.replace(/^SHA256:/, "").slice(0, 8);
+        const q =
+          k.kind === "changed"
+            ? `서버 관리자에게 새 지문이 맞는지 확인했다면, 지문 앞 8글자(${code})를 입력하세요: `
+            : "이 서버를 신뢰하고 연결할까요? (yes/no) ";
+        const typed = (await readLine(entry, q, false, true))?.trim();
+        if (entries.get(entry.paneId) !== entry) return null;
+        const accepted = k.kind === "changed" ? typed === code : typed?.toLowerCase() === "yes";
+        if (!accepted) return fail(entry, "연결을 취소했습니다.");
+        await api.hostTrust(k.hostId, k.fingerprint);
         term.write(`${DIM}호스트 키를 보관함에 저장했습니다.${RESET}\r\n`);
         continue;
       }
       if ("ask" in r) {
         if (r.ask.message) term.write(`${RED}${r.ask.message}${RESET}\r\n`);
-        const v = await readLine(term, r.ask.kind === "password" ? "비밀번호: " : "개인 키 암호: ", true);
+        const v = await readLine(entry, r.ask.kind === "password" ? "비밀번호: " : "개인 키 암호: ", true);
+        if (entries.get(entry.paneId) !== entry) return null;
         if (v === null) return fail(entry, "연결을 취소했습니다.");
         opts[r.ask.kind] = v;
         continue;
@@ -271,10 +294,21 @@ export function getPane(paneId: string, sessionId: string | null): PaneEntry {
     subs: [],
     liveId: null,
     search,
+    cancelPrompt: null,
     latency: null,
     backendId: Promise.resolve(null),
   };
   entries.set(paneId, entry);
+  // ⌘V 등 브라우저 붙여넣기도 xterm에 닿기 전에 같은 검사를 거친다.
+  host.addEventListener(
+    "paste",
+    (ev) => {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      safePaste(entry, ev.clipboardData?.getData("text/plain") ?? "");
+    },
+    true,
+  );
   start(entry);
   notify();
   return entry;
@@ -328,6 +362,8 @@ export async function disposePane(paneId: string) {
   if (!e) return;
   entries.delete(paneId);
   e.subs.forEach((d) => d.dispose());
+  // 비밀번호·호스트 키 입력을 기다리는 중이면 풀어 줘야 아래 await가 끝난다.
+  e.cancelPrompt?.();
   const id = await e.backendId;
   if (id) {
     byBackend.delete(id);
@@ -355,7 +391,17 @@ export async function pasteInto(paneId: string) {
   const e = entries.get(paneId);
   if (!e) return;
   const text = await navigator.clipboard.readText().catch(() => "");
-  if (text) e.term.paste(text);
+  safePaste(e, text);
+}
+
+/** 제어 문자를 빼고, 줄바꿈이 실행될 수 있으면 먼저 묻는다. */
+function safePaste(e: PaneEntry, text: string) {
+  const clean = sanitizePaste(text);
+  if (!clean) return;
+  const targets = broadcastOf.get(e.paneId)?.length ?? 1;
+  const warning = pasteWarning(clean, e.term.modes.bracketedPasteMode, targets);
+  if (warning && !window.confirm(warning)) return;
+  e.term.paste(clean);
 }
 
 export function clearPane(paneId: string) {

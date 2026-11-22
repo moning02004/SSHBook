@@ -17,6 +17,7 @@ use russh::client::{self, Handle};
 use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg, Disconnect};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +26,22 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 인증은 에이전트의 하드웨어 키 터치 등을 기다릴 수 있어서 넉넉히 둔다.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
+/// 인증 뒤 채널·PTY·셸 요청
+const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 서버가 답하지 않아도 끝나도록 시간 제한을 건다.
+async fn within<T, E: std::fmt::Display>(
+    what: &str,
+    limit: Duration,
+    f: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, OpenError> {
+    match tokio::time::timeout(limit, f).await {
+        Ok(r) => r.map_err(|e| other(what, e)),
+        Err(_) => Err(OpenError::Other(format!("{what}: 서버가 응답하지 않습니다"))),
+    }
+}
 
 pub enum Auth {
     Password(Option<Zeroizing<String>>),
@@ -47,6 +64,29 @@ pub struct Target {
 /// 보관함 known_hosts의 키
 pub fn host_id(host: &str, port: u16) -> String {
     format!("{}:{port}", host.trim().to_lowercase())
+}
+
+/// 사용자 확인을 기다리는 호스트 키.
+/// 같은 서버에 동시에 연결해도 섞이지 않도록 (서버, 지문) 쌍으로 보관한다.
+/// 그래야 사용자가 화면에서 본 바로 그 지문의 키만 저장된다.
+#[derive(Default)]
+pub struct PendingHosts(HashMap<(String, String), String>);
+
+impl PendingHosts {
+    pub fn insert(&mut self, p: &HostKeyPrompt) {
+        self.0.insert((p.host_id.clone(), p.fingerprint.clone()), p.key.clone());
+    }
+
+    /// 확인한 지문의 키를 꺼내고, 그 서버의 나머지 대기 키는 버린다.
+    pub fn take(&mut self, host_id: &str, fingerprint: &str) -> Option<String> {
+        let key = self.0.remove(&(host_id.to_string(), fingerprint.to_string()))?;
+        self.0.retain(|(h, _), _| h != host_id);
+        Some(key)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 /// 프론트엔드가 처리해야 하는 접속 중단 사유.
@@ -378,7 +418,10 @@ async fn establish(t: Target, via: Option<&Handle<Client>>, remote: RemoteMap) -
             return Err(other(&format!("{where_}에 연결하지 못했습니다"), e));
         }
     };
-    authenticate(&mut handle, &t.user, t.auth).await?;
+    match tokio::time::timeout(AUTH_TIMEOUT, authenticate(&mut handle, &t.user, t.auth)).await {
+        Ok(r) => r?,
+        Err(_) => return Err(OpenError::Other(format!("{where_} 인증: 서버가 응답하지 않습니다"))),
+    }
     Ok(handle)
 }
 
@@ -439,30 +482,36 @@ pub async fn connect(sink: Sink, c: Connect, cols: u16, rows: u16) -> Result<Ssh
     let remote = RemoteMap::default();
     let handle = Arc::new(establish(c.target, jump.as_deref(), remote.clone()).await?);
 
-    let ch = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| other("세션 채널을 열지 못했습니다", e))?;
-    ch.request_pty(
-        false,
-        "xterm-256color",
-        cols.max(2) as u32,
-        rows.max(2) as u32,
-        0,
-        0,
-        &[],
+    let ch = within(
+        "세션 채널을 열지 못했습니다",
+        SETUP_TIMEOUT,
+        handle.channel_open_session(),
     )
-    .await
-    .map_err(|e| other("터미널(PTY)을 요청하지 못했습니다", e))?;
+    .await?;
+    within(
+        "터미널(PTY)을 요청하지 못했습니다",
+        SETUP_TIMEOUT,
+        ch.request_pty(
+            false,
+            "xterm-256color",
+            cols.max(2) as u32,
+            rows.max(2) as u32,
+            0,
+            0,
+            &[],
+        ),
+    )
+    .await?;
     match c.start_dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        Some(dir) => ch
-            .exec(false, start_command(dir))
-            .await
-            .map_err(|e| other("시작 경로로 셸을 열지 못했습니다", e))?,
-        None => ch
-            .request_shell(false)
-            .await
-            .map_err(|e| other("셸을 열지 못했습니다", e))?,
+        Some(dir) => {
+            within(
+                "시작 경로로 셸을 열지 못했습니다",
+                SETUP_TIMEOUT,
+                ch.exec(false, start_command(dir)),
+            )
+            .await?
+        }
+        None => within("셸을 열지 못했습니다", SETUP_TIMEOUT, ch.request_shell(false)).await?,
     }
 
     let mut tasks = forward::start_all(&handle, &remote, &c.forwards, &sink).await;
@@ -927,6 +976,25 @@ mod tests {
         assert_eq!(k.fingerprint, parsed.fingerprint(HashAlg::Sha256).to_string());
         assert!(k.fingerprint.starts_with("SHA256:"));
         assert_eq!(describe_known("x:22", "garbage").algorithm, "?");
+    }
+
+    #[test]
+    fn pending_host_keys_do_not_mix() {
+        let p = |fp: &str, key: &str| HostKeyPrompt {
+            kind: "unknown",
+            host_id: "srv:22".into(),
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: fp.into(),
+            key: key.into(),
+        };
+        let mut pending = PendingHosts::default();
+        pending.insert(&p("SHA256:real", "real-key"));
+        // 같은 서버의 다른 연결에 다른 키가 와도 앞의 것을 덮어쓰지 않는다.
+        pending.insert(&p("SHA256:attacker", "attacker-key"));
+        assert_eq!(pending.take("srv:22", "SHA256:nope"), None);
+        assert_eq!(pending.take("srv:22", "SHA256:real").as_deref(), Some("real-key"));
+        // 확인이 끝나면 그 서버의 다른 대기 키는 남지 않는다.
+        assert_eq!(pending.take("srv:22", "SHA256:attacker"), None);
     }
 
     #[test]

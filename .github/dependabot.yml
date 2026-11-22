@@ -1,0 +1,7 @@
+# 커밋 SHA로 고정한 GitHub Actions의 새 버전을 PR로 알려 준다.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

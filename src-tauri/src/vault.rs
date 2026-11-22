@@ -53,6 +53,8 @@ pub enum VaultError {
     AlreadyExists,
     #[error("난수를 만들지 못했습니다.")]
     Random,
+    #[error("보관함 파일 자신에게는 내보낼 수 없습니다. 다른 위치를 고르세요.")]
+    SameFile,
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;
@@ -179,6 +181,22 @@ pub struct Forward {
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+}
+
+impl Forward {
+    /// 저장하거나 열기 전에 확인한다. 문제가 있으면 사용자에게 보일 문장.
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.bind_port == 0 {
+            return Some("포워딩 포트는 1~65535 사이여야 합니다.");
+        }
+        if self.kind != ForwardKind::Dynamic {
+            let host_ok = self.host.as_deref().is_some_and(|h| !h.trim().is_empty());
+            if !host_ok || self.port.unwrap_or(0) == 0 {
+                return Some("포워딩 목적지의 호스트와 포트를 입력하세요.");
+            }
+        }
+        None
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,6 +396,9 @@ impl OpenVault {
     /// 지금 내용을 다른 비밀번호로 잠근 파일로 내보낸다(이 보관함은 그대로).
     /// 마스터 비밀번호 없이 쓸 때: 다른 PC에는 이 PC의 열쇠 파일이 없기 때문이다.
     pub fn export_with_password(&self, dest: &Path, password: &str) -> Result<()> {
+        if same_file(dest, &self.path) {
+            return Err(VaultError::SameFile);
+        }
         let salt = random::<SALT_LEN>()?.to_vec();
         let copy = OpenVault {
             path: dest.to_path_buf(),
@@ -386,7 +407,14 @@ impl OpenVault {
             salt,
             data: self.data.clone(),
         };
-        crate::fsperm::write_private(dest, &copy.seal()?)?;
+        // 임시 파일에 쓴 뒤 바꿔치기해서, 실패해도 그 자리의 파일이 깨지지 않게 한다.
+        let mut tmp = dest.as_os_str().to_owned();
+        tmp.push(".sshbook-tmp");
+        let tmp = PathBuf::from(tmp);
+        crate::fsperm::write_private(&tmp, &copy.seal()?)?;
+        fs::rename(&tmp, dest).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })?;
         Ok(())
     }
 
@@ -409,11 +437,22 @@ impl OpenVault {
     /// 지금 내용을 저장한 뒤 파일을 그대로 복사한다. 내보낸 파일도 같은 비밀번호로 잠겨 있다.
     pub fn export_to(&self, dest: &Path) -> Result<()> {
         self.save()?;
-        if dest != self.path {
+        // 다른 경로 표기(심볼릭 링크 등)로 자기 자신에 복사하면 파일이 비워질 수 있다.
+        if !same_file(dest, &self.path) {
             fs::copy(&self.path, dest)?;
         }
         Ok(())
     }
+}
+
+/// 두 경로가 같은 파일인지(없는 경로는 글자로만 비교)
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+/// 파일 하나를 old로 열어 new로 다시 잠근다(다른 비밀번호의 파일이면 실패하고 그대로 둔다).
+pub fn rekey_file(path: &Path, old: &str, new: &str) -> Result<()> {
+    OpenVault::open(path, old)?.reseal_in_place(new)
 }
 
 /// 보관함 자동 백업. 보관함 옆 `backups/` 폴더에 `vault-<날짜-시각>.sshv`로 남긴다.
@@ -667,6 +706,39 @@ mod tests {
         assert_eq!(opens("random-secret"), 0);
         assert_eq!(opens("master two"), 1);
         assert!(opens("master one") >= 1, "끄기 전 백업은 그때 비밀번호로 남는다");
+    }
+
+    #[test]
+    fn export_refuses_the_vault_itself() {
+        let path = tmp_path("vault.sshv");
+        let v = OpenVault::create(&path, "correct horse", FAST).unwrap();
+        assert!(matches!(
+            v.export_with_password(&path, "other pw 1"),
+            Err(VaultError::SameFile)
+        ));
+        // 같은 파일을 다른 표기로 가리켜도 막는다.
+        let dotted = path.parent().unwrap().join(".").join("vault.sshv");
+        assert!(matches!(
+            v.export_with_password(&dotted, "other pw 1"),
+            Err(VaultError::SameFile)
+        ));
+        v.export_to(&dotted).unwrap();
+        assert!(OpenVault::open(&path, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn forward_validation() {
+        let f = |kind, bind_port, host: Option<&str>, port| Forward {
+            kind,
+            bind_port,
+            host: host.map(String::from),
+            port,
+        };
+        assert!(f(ForwardKind::Local, 8000, Some("db"), Some(5432)).problem().is_none());
+        assert!(f(ForwardKind::Dynamic, 1080, None, None).problem().is_none());
+        assert!(f(ForwardKind::Dynamic, 0, None, None).problem().is_some());
+        assert!(f(ForwardKind::Local, 8000, Some("  "), Some(5432)).problem().is_some());
+        assert!(f(ForwardKind::Remote, 8000, Some("db"), Some(0)).problem().is_some());
     }
 
     #[test]

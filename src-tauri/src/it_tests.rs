@@ -157,7 +157,7 @@ async fn it_sftp_round_trip() {
 
     let back = local_dir.join("back.txt");
     assert_eq!(
-        sftp::download(conn, &remote, &back, false, &q).await.unwrap(),
+        sftp::download(conn, &remote, &back, false, false, &q).await.unwrap(),
         body.len() as u64
     );
     assert_eq!(std::fs::read(&back).unwrap(), body);
@@ -317,16 +317,20 @@ async fn it_sftp_folder_round_trip_with_progress_and_cancel() {
     // 폴더째 내려받기
     let down = base.join("down");
     std::fs::create_dir_all(&down).unwrap();
-    let n = sftp::download(
-        conn,
-        &format!("{remote_dir}/proj"),
-        &down,
-        true,
-        &sftp::Transfer::quiet(),
-    )
-    .await
-    .unwrap();
+    let from = format!("{remote_dir}/proj");
+    let n = sftp::download(conn, &from, &down, true, false, &sftp::Transfer::quiet())
+        .await
+        .unwrap();
     assert_eq!(n, 200_004);
+    // 이미 있는 폴더는 허락 없이 덮어쓰지 않는다.
+    std::fs::write(down.join("proj/a.txt"), b"local edit").unwrap();
+    let again = sftp::download(conn, &from, &down, true, false, &sftp::Transfer::quiet()).await;
+    assert!(again.unwrap_err().starts_with("exists:"));
+    assert_eq!(std::fs::read(down.join("proj/a.txt")).unwrap(), b"local edit");
+    sftp::download(conn, &from, &down, true, true, &sftp::Transfer::quiet())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(down.join("proj/a.txt")).unwrap().len(), 200_000);
     assert_eq!(std::fs::read(down.join("proj/sub/deep/b.txt")).unwrap(), b"deep");
 
     // 취소: 시작하자마자 취소 표시 → 오류, 쓰다 만 파일은 남지 않는다
@@ -337,10 +341,17 @@ async fn it_sftp_folder_round_trip_with_progress_and_cancel() {
         &format!("{remote_dir}/proj/a.txt"),
         &base.join("x.txt"),
         false,
+        false,
         &c,
     )
     .await
     .unwrap_err();
     assert_eq!(err, sftp::CANCELLED);
-    assert!(!base.join("x.txt").exists() && !base.join("x.sshbook-part").exists());
+    assert!(!base.join("x.txt").exists());
+    let leftovers = std::fs::read_dir(&base)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+        .count();
+    assert_eq!(leftovers, 0);
 }

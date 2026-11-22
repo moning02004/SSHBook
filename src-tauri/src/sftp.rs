@@ -39,16 +39,18 @@ pub async fn session(conn: &Conn) -> Result<Arc<SftpSession>, String> {
     if let Some(s) = slot.as_ref() {
         return Ok(s.clone());
     }
-    let ch = conn
-        .handle
-        .channel_open_session()
+    let slow = || "SFTP를 시작하지 못했습니다: 서버가 응답하지 않습니다".to_string();
+    let ch = tokio::time::timeout(OPEN_TIMEOUT, conn.handle.channel_open_session())
         .await
+        .map_err(|_| slow())?
         .map_err(|e| e2s("SFTP 채널을 열지 못했습니다", e))?;
-    ch.request_subsystem(true, "sftp")
+    tokio::time::timeout(OPEN_TIMEOUT, ch.request_subsystem(true, "sftp"))
         .await
+        .map_err(|_| slow())?
         .map_err(|e| e2s("서버가 SFTP를 지원하지 않습니다", e))?;
-    let s = SftpSession::new(ch.into_stream())
+    let s = tokio::time::timeout(OPEN_TIMEOUT, SftpSession::new(ch.into_stream()))
         .await
+        .map_err(|_| slow())?
         .map_err(|e| e2s("SFTP를 시작하지 못했습니다", e))?;
     s.set_timeout(30);
     let s = Arc::new(s);
@@ -65,10 +67,9 @@ const CWD_SCRIPT: &str = r#"exec sh -c 'me=$$; pp=$PPID; for d in /proc/[0-9]*; 
 
 /// 터미널 셸의 지금 폴더. 알 수 없으면(리눅스가 아니거나 권한이 없으면) None.
 pub async fn terminal_cwd(conn: &Conn) -> Result<Option<String>, String> {
-    let mut ch = conn
-        .handle
-        .channel_open_session()
+    let mut ch = tokio::time::timeout(OPEN_TIMEOUT, conn.handle.channel_open_session())
         .await
+        .map_err(|_| "서버에 명령 채널을 열지 못했습니다: 서버가 응답하지 않습니다".to_string())?
         .map_err(|e| e2s("서버에 명령 채널을 열지 못했습니다", e))?;
     ch.exec(true, CWD_SCRIPT)
         .await
@@ -142,6 +143,39 @@ pub fn join(dir: &str, name: &str) -> String {
 
 const CHUNK: usize = 256 * 1024;
 const STALL: Duration = Duration::from_secs(60);
+const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 서버가 보낸 파일 이름을 내 PC 경로에 붙여도 되는지.
+/// 악성 서버가 `..`, 경로 구분자, Windows의 `C:evil`(드라이브로 건너뜀), 예약 이름으로
+/// 고른 폴더 밖에 쓰지 못하게 한다.
+fn is_safe_name(name: &str, windows: bool) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.len() > 255 {
+        return false;
+    }
+    if name.chars().any(|c| c == '/' || c == '\\' || c.is_control()) {
+        return false;
+    }
+    if !windows {
+        return true;
+    }
+    if name.chars().any(|c| "<>:\"|?*".contains(c)) || name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let numbered = |p: &str| {
+        stem.strip_prefix(p)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit())
+    };
+    !(matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || numbered("COM")
+        || numbered("LPT"))
+}
+
+/// 받는 중인 파일. 같은 폴더의 다른 파일과 겹치지 않는 이름을 쓴다.
+fn part_path(local: &Path) -> PathBuf {
+    let tail = uuid::Uuid::new_v4().simple().to_string();
+    local.with_file_name(format!(".sshbook-{tail}.part"))
+}
 
 /// 전송 진행률(화면에 보낸다)
 #[derive(Serialize, Clone, Default, Debug)]
@@ -250,7 +284,11 @@ async fn walk_remote(s: &SftpSession, root_remote: &str, root_local: &Path, t: &
             .map_err(|e| e2s(&format!("폴더를 읽지 못했습니다 ({rdir})"), e))?;
         for d in rd {
             let name = d.file_name();
-            if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+            if name == "." || name == ".." {
+                continue;
+            }
+            if !is_safe_name(&name, cfg!(windows)) {
+                crate::applog::warn(&format!("안전하지 않은 파일 이름을 건너뜀: {:?} ({rdir})", name));
                 continue;
             }
             let m = d.metadata();
@@ -275,7 +313,7 @@ async fn copy_down(s: &SftpSession, remote: &str, local: &Path, m: &mut Meter<'_
         .open(remote)
         .await
         .map_err(|e| e2s(&format!("원격 파일을 열지 못했습니다 ({remote})"), e))?;
-    let tmp = local.with_extension("sshbook-part");
+    let tmp = part_path(local);
     let mut dst = tokio::fs::File::create(&tmp)
         .await
         .map_err(|e| e2s("내 PC에 파일을 만들지 못했습니다", e))?;
@@ -310,15 +348,38 @@ async fn copy_down(s: &SftpSession, remote: &str, local: &Path, m: &mut Meter<'_
 
 /// 내려받기. 파일이면 local이 저장할 파일 경로, 폴더면 local 폴더 안에 같은 이름으로 만든다.
 /// 돌려주는 값은 옮긴 바이트 수.
-pub async fn download(conn: &Conn, remote: &str, local: &Path, is_dir: bool, t: &Transfer) -> Result<u64, String> {
+/// 폴더가 이미 있으면 overwrite가 true일 때만 그 안에 덮어쓴다(아니면 `exists:<경로>` 오류).
+pub async fn download(
+    conn: &Conn,
+    remote: &str,
+    local: &Path,
+    is_dir: bool,
+    overwrite: bool,
+    t: &Transfer,
+) -> Result<u64, String> {
     let s = session(conn).await?;
     let (files, dirs) = if is_dir {
-        walk_remote(&s, remote, &local.join(base_name(remote)), t).await?
+        let name = base_name(remote);
+        if !is_safe_name(&name, cfg!(windows)) {
+            return Err(format!("내려받을 수 없는 폴더 이름입니다: {name:?}"));
+        }
+        let root = local.join(name);
+        if !overwrite && tokio::fs::symlink_metadata(&root).await.is_ok() {
+            return Err(format!("exists:{}", root.display()));
+        }
+        walk_remote(&s, remote, &root, t).await?
     } else {
         let size = s.metadata(remote).await.ok().and_then(|m| m.size).unwrap_or(0);
         (vec![(remote.to_string(), local.to_path_buf(), size)], vec![])
     };
     for d in &dirs {
+        // 이미 있는 폴더가 심볼릭 링크면 따라가서 다른 곳에 쓰게 되므로 멈춘다.
+        if tokio::fs::symlink_metadata(d)
+            .await
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(format!("심볼릭 링크 폴더에는 내려받지 않습니다: {}", d.display()));
+        }
         tokio::fs::create_dir_all(d)
             .await
             .map_err(|e| e2s("내 PC에 폴더를 만들지 못했습니다", e))?;
@@ -490,6 +551,31 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok);
+    }
+
+    #[test]
+    fn rejects_names_that_escape_the_folder() {
+        use super::is_safe_name as ok;
+        for bad in ["", ".", "..", "a/b", "a\\b", "../x", "x\nY", "x\u{1b}[2J"] {
+            assert!(!ok(bad, false) && !ok(bad, true), "{bad:?}");
+        }
+        for win_bad in [
+            "C:evil", "a:stream", "CON", "con.txt", "NUL", "COM1.log", "LPT9", "a.", "a ", "a?b",
+        ] {
+            assert!(!ok(win_bad, true), "{win_bad:?}");
+        }
+        for good in ["a.txt", ".env", "한글 파일.log", "COMMIT", "console.log", "LPT10"] {
+            assert!(ok(good, true) && ok(good, false), "{good:?}");
+        }
+        assert!(ok("C:evil", false), "맥·리눅스에서 콜론은 평범한 글자다");
+    }
+
+    #[test]
+    fn part_file_never_collides_with_a_sibling() {
+        let p = std::path::Path::new("/tmp/dir/a.txt");
+        let (x, y) = (super::part_path(p), super::part_path(p));
+        assert_ne!(x, y);
+        assert_eq!(x.parent(), p.parent());
     }
 
     #[test]

@@ -606,10 +606,14 @@ export function App() {
     setMenu(null);
     setSearchPane(null);
     setSftpPanes(new Set());
-    await terms.disposeAll();
-    setDesk(emptyDesk);
-    setPanes({});
-    await api.vaultLock();
+    // 보관함부터 잠근다. 창 정리를 기다리다가 잠금이 늦어지면 안 된다.
+    try {
+      await api.vaultLock();
+    } finally {
+      void terms.disposeAll();
+      setDesk(emptyDesk);
+      setPanes({});
+    }
     await refresh();
   };
 

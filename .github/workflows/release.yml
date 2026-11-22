@@ -15,8 +15,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# 기본은 읽기만. 쓰기는 릴리스를 다루는 작업에만 준다.
+# 이 워크플로는 업데이트 서명 키를 쓰므로 외부 Action을 커밋 SHA로 고정한다(태그는 바뀔 수 있다).
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -26,12 +28,18 @@ jobs:
   # 1) 릴리스를 초안으로 만든다. 초안은 'latest'로 잡히지 않으므로
   #    빌드가 다 끝나기 전에는 앱이 새 버전을 보지 않는다(반쯤 올라간 latest.json 방지).
   create-release:
+    # 수동 실행은 main에서만. 다른 브랜치의 코드에 서명하지 않는다.
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       id: ${{ steps.release.outputs.id }}
       notes: ${{ steps.release.outputs.notes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -68,6 +76,8 @@ jobs:
   # 2) OS마다 빌드해서 초안 릴리스에 붙인다.
   build:
     needs: create-release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -81,24 +91,22 @@ jobs:
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.rust_targets }}
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -115,6 +123,8 @@ jobs:
   publish:
     needs: [create-release, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

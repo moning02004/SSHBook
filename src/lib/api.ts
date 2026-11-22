@@ -147,7 +147,7 @@ export interface Backend {
   /** 터미널 셸이 지금 있는 폴더. 알 수 없으면 null */
   sftpCwd(termId: string): Promise<string | null>;
   /** 파일이면 local = 저장할 파일, 폴더면 local 폴더 안에 같은 이름으로. 옮긴 바이트 수 */
-  sftpDownload(termId: string, remote: string, local: string, isDir: boolean, transferId: string): Promise<number>;
+  sftpDownload(termId: string, remote: string, local: string, isDir: boolean, overwrite: boolean, transferId: string): Promise<number>;
   /** 파일·폴더들을 원격 폴더로. 올린 파일 수 */
   sftpUpload(termId: string, locals: string[], remoteDir: string, transferId: string): Promise<number>;
   sftpCancel(transferId: string): Promise<void>;
@@ -158,7 +158,7 @@ export interface Backend {
   /** sessionId가 없으면 OS 기본 셸을 연다. 터미널 id를 돌려준다. */
   termOpen(sessionId: string | null, cols: number, rows: number, opts?: OpenOptions): Promise<string>;
   /** 사용자가 확인한 호스트 키를 보관함에 저장한다 */
-  hostTrust(hostId: string): Promise<void>;
+  hostTrust(hostId: string, fingerprint: string): Promise<void>;
   knownHostsList(): Promise<KnownHost[]>;
   knownHostRemove(hostId: string): Promise<void>;
   termWrite(id: string, data: string): Promise<void>;
@@ -194,7 +194,7 @@ const tauriBackend: Backend = {
   openLogsDir: () => invoke("open_logs_dir"),
   sftpList: (id, path) => invoke("sftp_list", { id, path }),
   sftpCwd: (id) => invoke("sftp_cwd", { id }),
-  sftpDownload: (id, remote, local, isDir, transferId) => invoke("sftp_download", { id, remote, local, isDir, transferId }),
+  sftpDownload: (id, remote, local, isDir, overwrite, transferId) => invoke("sftp_download", { id, remote, local, isDir, overwrite, transferId }),
   sftpUpload: (id, locals, remoteDir, transferId) => invoke("sftp_upload", { id, locals, remoteDir, transferId }),
   sftpCancel: (transferId) => invoke("sftp_cancel", { transferId }),
   onSftpProgress: (cb) => listen<SftpProgress>("sftp-progress", (e) => cb(e.payload)),
@@ -203,7 +203,7 @@ const tauriBackend: Backend = {
   sftpRename: (id, from, to) => invoke("sftp_rename", { id, from, to }),
   termOpen: (sessionId, cols, rows, opts) =>
     invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null }),
-  hostTrust: (hostId) => invoke("host_trust", { hostId }),
+  hostTrust: (hostId, fingerprint) => invoke("host_trust", { hostId, fingerprint }),
   knownHostsList: () => invoke("known_hosts_list"),
   knownHostRemove: (hostId) => invoke("known_host_remove", { hostId }),
   termWrite: (id, data) => invoke("term_write", { id, data }),
@@ -376,7 +376,7 @@ function createMockBackend(): Backend {
     async sftpCwd() {
       return "/home/dev/app";
     },
-    async sftpDownload(_id, _remote, _local, _isDir, transferId) {
+    async sftpDownload(_id, _remote, _local, _isDir, _overwrite, transferId) {
       await fakeTransfer(transferId, 5_242_880, 3);
       return 5_242_880;
     },

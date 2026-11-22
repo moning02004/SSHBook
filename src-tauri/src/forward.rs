@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 /// 원격 포워딩: 서버 쪽 포트 → 내 PC에서 이어 줄 곳
 pub type RemoteMap = Arc<Mutex<HashMap<u32, (String, u16)>>>;
 
+const SOCKS_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const DIM: &str = "\x1b[2m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
@@ -44,6 +45,10 @@ pub async fn start_all(
     let mut tasks = Vec::new();
     for f in forwards {
         let what = describe(f);
+        if let Some(problem) = f.problem() {
+            note(sink, false, format!("{what} — 열지 못했습니다: {problem}"));
+            continue;
+        }
         let dest = || -> Option<(String, u16)> {
             let host = f.host.as_deref().map(str::trim).filter(|h| !h.is_empty())?.to_string();
             Some((host, f.port.filter(|p| *p > 0)?))
@@ -128,7 +133,8 @@ pub async fn pipe_to_local(channel: Channel<Msg>, host: String, port: u16) {
 // ---- SOCKS5 (인증 없음, CONNECT만) ----
 
 async fn socks_conn(mut sock: TcpStream, handle: Arc<Handle<Client>>) {
-    let Ok((host, port)) = socks_handshake(&mut sock).await else {
+    // 인사만 하고 멈춘 접속이 쌓이지 않게 시간 제한을 둔다.
+    let Ok(Ok((host, port))) = tokio::time::timeout(SOCKS_HELLO_TIMEOUT, socks_handshake(&mut sock)).await else {
         return;
     };
     let (ip, from) = peer(&sock);

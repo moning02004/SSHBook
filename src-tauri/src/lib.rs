@@ -13,6 +13,7 @@ mod vault;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -40,7 +41,9 @@ struct AppState {
     vault: Mutex<Option<OpenVault>>,
     terms: Mutex<HashMap<String, Term>>,
     /// 사용자 확인을 기다리는 호스트 키 ("host:port" → 공개 키)
-    pending_hosts: Mutex<HashMap<String, String>>,
+    pending_hosts: Mutex<ssh::PendingHosts>,
+    /// 잠글 때마다 올라간다. 잠그는 사이에 끝난 접속을 알아채서 바로 닫는다.
+    lock_generation: AtomicU64,
     /// 진행 중인 파일 전송의 취소 표시 (전송 id → 표시)
     transfers: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
 }
@@ -81,6 +84,7 @@ fn vault_status(app: AppHandle, state: State<'_, AppState>) -> CmdResult<VaultSt
 // Argon2가 수백 ms 걸리므로 async로 두어 UI 스레드를 막지 않는다.
 #[tauri::command]
 async fn vault_create(app: AppHandle, state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = Zeroizing::new(password);
     if password.chars().count() < 8 {
         return Err("마스터 비밀번호는 8자 이상이어야 합니다.".into());
     }
@@ -93,6 +97,7 @@ async fn vault_create(app: AppHandle, state: State<'_, AppState>, password: Stri
 
 #[tauri::command]
 async fn vault_unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = Zeroizing::new(password);
     let path = vault_path(&app)?;
     let v = OpenVault::open(&path, &password).map_err(|e| {
         applog::warn(&format!("보관함을 열지 못함: {e}"));
@@ -101,7 +106,7 @@ async fn vault_unlock(app: AppHandle, state: State<'_, AppState>, password: Stri
     // 예전 버전이 만든 보관함(0644)도 내 계정만 읽게 맞춘다.
     let _ = fsperm::fix_mode(&path);
     // 직접 입력한 비밀번호로 열렸다면 남아 있는 열쇠 파일은 이 보관함과 맞지 않는 것이다.
-    nopass::retire(&path);
+    nopass::retire(&path, &password);
     *lock(&state.vault) = Some(v);
     Ok(())
 }
@@ -122,6 +127,7 @@ async fn vault_unlock_auto(app: AppHandle, state: State<'_, AppState>) -> CmdRes
 /// 마스터 비밀번호 끄기: 지금 비밀번호를 확인하고, 임의의 비밀번호로 다시 잠근 뒤 열쇠 파일에 둔다.
 #[tauri::command]
 async fn vault_disable_password(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = Zeroizing::new(password);
     let mut guard = lock(&state.vault);
     let v = guard.as_mut().ok_or(LOCKED)?;
     let path = v.path().to_path_buf();
@@ -143,6 +149,7 @@ async fn vault_disable_password(state: State<'_, AppState>, password: String) ->
 /// 마스터 비밀번호 다시 켜기: 보관함과, 끈 동안 생긴 백업을 새 비밀번호로 잠그고 열쇠 파일을 지운다.
 #[tauri::command]
 async fn vault_enable_password(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = Zeroizing::new(password);
     if password.chars().count() < 8 {
         return Err("마스터 비밀번호는 8자 이상이어야 합니다.".into());
     }
@@ -159,6 +166,11 @@ async fn vault_enable_password(state: State<'_, AppState>, password: String) -> 
 
 #[tauri::command]
 fn vault_lock(state: State<'_, AppState>) {
+    // 지금 접속 중인 것은 끝나는 대로 닫히게 표시해 둔다.
+    state.lock_generation.fetch_add(1, Ordering::SeqCst);
+    for flag in lock(&state.transfers).values() {
+        flag.store(true, Ordering::Relaxed);
+    }
     for (_, t) in lock(&state.terms).drain() {
         t.close();
     }
@@ -173,6 +185,7 @@ async fn vault_change_password(
     old_password: String,
     new_password: String,
 ) -> CmdResult<()> {
+    let (old_password, new_password) = (Zeroizing::new(old_password), Zeroizing::new(new_password));
     if new_password.chars().count() < 8 {
         return Err("마스터 비밀번호는 8자 이상이어야 합니다.".into());
     }
@@ -188,6 +201,7 @@ async fn vault_change_password(
 /// 보관함 파일 내보내기. 마스터 비밀번호 없이 쓰는 중이면 내보낼 파일의 비밀번호가 필요하다.
 #[tauri::command]
 async fn vault_export(state: State<'_, AppState>, dest: String, password: Option<String>) -> CmdResult<()> {
+    let password = password.map(Zeroizing::new);
     let guard = lock(&state.vault);
     let v = guard.as_ref().ok_or(LOCKED)?;
     let dest = PathBuf::from(dest);
@@ -201,9 +215,10 @@ async fn vault_export(state: State<'_, AppState>, dest: String, password: Option
 
 #[tauri::command]
 async fn vault_import(app: AppHandle, state: State<'_, AppState>, src: String, password: String) -> CmdResult<()> {
+    let password = Zeroizing::new(password);
     let dest = vault_path(&app)?;
     let v = vault::import(&PathBuf::from(src), &dest, &password).map_err(|e| e.to_string())?;
-    nopass::retire(&dest);
+    nopass::retire(&dest, &password);
     *lock(&state.vault) = Some(v);
     Ok(())
 }
@@ -254,6 +269,9 @@ fn session_save(state: State<'_, AppState>, session: Session, secret: Option<Sec
         && (s.host.as_deref().unwrap_or("").trim().is_empty() || s.user.as_deref().unwrap_or("").trim().is_empty())
     {
         return Err("호스트와 사용자를 입력하세요.".into());
+    }
+    if let Some(problem) = s.forwards.iter().find_map(|f| f.problem()) {
+        return Err(problem.into());
     }
     if s.id.is_empty() {
         s.id = uuid::Uuid::new_v4().to_string();
@@ -549,6 +567,7 @@ async fn term_open(
     passphrase: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
+    let generation = state.lock_generation.load(Ordering::SeqCst);
     let plan = plan_for(&app, &state, session_id, password, passphrase)
         .inspect_err(|e| applog::warn(&format!("연결 준비 실패: {e}")))?;
     let term = match plan {
@@ -564,7 +583,9 @@ async fn term_open(
                 }
                 Err(ssh::OpenError::HostKey(p)) => {
                     applog::info(&format!("호스트 키 확인 필요 {} ({})", p.host_id, p.kind));
-                    lock(&state.pending_hosts).insert(p.host_id.clone(), p.key.clone());
+                    if state.lock_generation.load(Ordering::SeqCst) == generation {
+                        lock(&state.pending_hosts).insert(&p);
+                    }
                     return Err(ssh::OpenError::HostKey(p).into_message());
                 }
                 // 비밀번호를 다시 묻는 것은 정상 흐름이라 남기지 않는다.
@@ -577,7 +598,14 @@ async fn term_open(
             }
         }
     };
-    lock(&state.terms).insert(id.clone(), term);
+    // 접속하는 사이에 보관함을 잠갔다면 이 연결을 남기지 않는다.
+    let mut terms = lock(&state.terms);
+    if state.lock_generation.load(Ordering::SeqCst) != generation {
+        drop(terms);
+        term.close();
+        return Err(LOCKED.into());
+    }
+    terms.insert(id.clone(), term);
     Ok(id)
 }
 
@@ -606,9 +634,10 @@ fn known_host_remove(state: State<'_, AppState>, host_id: String) -> CmdResult<(
 
 /// 사용자가 지문을 확인한 서버 키를 보관함에 저장한다.
 #[tauri::command]
-fn host_trust(state: State<'_, AppState>, host_id: String) -> CmdResult<()> {
+fn host_trust(state: State<'_, AppState>, host_id: String, fingerprint: String) -> CmdResult<()> {
+    // 사용자가 화면에서 본 지문의 키만 저장한다.
     let key = lock(&state.pending_hosts)
-        .remove(&host_id)
+        .take(&host_id, &fingerprint)
         .ok_or("확인할 호스트 키가 없습니다. 다시 연결해 보세요.")?;
     let mut guard = lock(&state.vault);
     let v = guard.as_mut().ok_or(LOCKED)?;
@@ -680,6 +709,7 @@ fn vault_backups(app: AppHandle) -> CmdResult<Vec<vault::backup::Backup>> {
 /// 백업으로 되돌린다. 지금 보관함은 .sshv.bak으로 남는다. 그 백업 때의 마스터 비밀번호가 필요하다.
 #[tauri::command]
 async fn vault_restore(app: AppHandle, state: State<'_, AppState>, backup: String, password: String) -> CmdResult<()> {
+    let password = Zeroizing::new(password);
     let dest = vault_path(&app)?;
     let src = PathBuf::from(&backup);
     if !vault::backup::is_backup_of(&dest, &src) {
@@ -690,7 +720,7 @@ async fn vault_restore(app: AppHandle, state: State<'_, AppState>, backup: Strin
         (true, Some(secret)) => vault::import(&src, &dest, &secret).map_err(|e| e.to_string())?,
         _ => {
             let v = vault::import(&src, &dest, &password).map_err(|e| e.to_string())?;
-            nopass::retire(&dest);
+            nopass::retire(&dest, &password);
             v
         }
     };
@@ -751,13 +781,15 @@ async fn sftp_download(
     remote: String,
     local: String,
     is_dir: bool,
+    overwrite: bool,
     transfer_id: String,
 ) -> CmdResult<u64> {
     let c = conn_of(&state, &id)?;
     let t = start_transfer(&app, &state, &transfer_id);
-    let r = sftp::download(&c, &remote, &PathBuf::from(local), is_dir, &t).await;
+    let r = sftp::download(&c, &remote, &PathBuf::from(local), is_dir, overwrite, &t).await;
     lock(&state.transfers).remove(&transfer_id);
-    if matches!(&r, Err(e) if e == sftp::CANCELLED) {
+    // 취소와 "이미 있음"은 채널 문제가 아니므로 SFTP 세션을 버리지 않는다.
+    if matches!(&r, Err(e) if e == sftp::CANCELLED || e.starts_with("exists:")) {
         return r;
     }
     sftp_call(&c, r).await

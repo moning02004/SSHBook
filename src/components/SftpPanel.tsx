@@ -143,7 +143,17 @@ export function SftpPanel({ paneId, onClose }: Props) {
     const dest = e.isDir ? await pickFolder(`'${e.name}' 폴더를 내려받을 곳`) : await pickSavePath(e.name);
     if (!dest) return;
     await runTransfer(`${e.name} 내려받는 중`, async (id) => {
-      const n = await api.sftpDownload(termId, joinPath(path, e.name), dest, e.isDir, id);
+      const remote = joinPath(path, e.name);
+      let n: number;
+      try {
+        // 파일은 저장 창에서 이미 덮어쓰기를 확인했다.
+        n = await api.sftpDownload(termId, remote, dest, e.isDir, !e.isDir, id);
+      } catch (err) {
+        const text = errorText(err);
+        if (!text.startsWith("exists:")) throw err;
+        if (!window.confirm(`'${text.slice(7)}' 폴더가 이미 있습니다.\n같은 이름의 파일을 덮어쓸까요?`)) return "내려받기를 취소했습니다.";
+        n = await api.sftpDownload(termId, remote, dest, true, true, id);
+      }
       return `내려받았습니다 (${humanSize(n)}): ${e.isDir ? `${dest}/${e.name}` : dest}`;
     });
   };
