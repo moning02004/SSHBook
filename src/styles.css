@@ -224,6 +224,25 @@ body.resizing .term-slot { pointer-events: none; }
 .dialog { width: 100%; max-width: 520px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: var(--pop); }
 .dialog.small { max-width: 400px; margin-top: 10vh; }
 .dialog.wide { max-width: 600px; }
+/* 세션 편집: 머리글과 바닥글은 고정하고 본문만 스크롤한다 */
+.dialog.session-editor { display: flex; flex-direction: column; max-height: calc(100vh - 96px); }
+.session-editor .dialog-head, .session-editor .dialog-foot { flex: none; }
+.session-editor .dialog-body { flex: 1; min-height: 0; overflow-y: auto; }
+.session-editor .dialog-body > * { flex: none; }
+.session-editor .dialog-body { gap: 0; padding-top: 2px; padding-bottom: 16px; }
+.form-section { display: flex; flex-direction: column; gap: 12px; padding: 16px 0; }
+.form-section + .form-section { border-top: 1px solid var(--line-soft); }
+.form-section h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.grid-conn { display: grid; grid-template-columns: minmax(0, 1fr) 84px 150px; gap: 12px; }
+.grid-conn > :first-child { min-width: 0; }
+.session-editor .check .hint { display: block; margin-top: 2px; }
+.session-editor .advanced > summary { color: var(--text); font-size: 13px; }
+.session-editor .advanced > summary .hint { margin-left: 6px; font-weight: 400; }
+.form-error { flex: none; padding: 8px 20px; border-top: 1px solid var(--line-soft); }
+@media (max-width: 560px) {
+  .grid-conn { grid-template-columns: minmax(0, 1fr) 84px; }
+  .grid-conn > :last-child { grid-column: 1 / -1; }
+}
 
 /* ---- 설정 ---- */
 select.input { appearance: none; padding-right: 32px; cursor: pointer; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 17px, calc(100% - 12px) 17px; background-size: 5px 5px; background-repeat: no-repeat; }
@@ -462,7 +481,6 @@ body.dragging-tab .term-slot { pointer-events: none; }
 
 .gtab-rename { width: 140px; height: 24px; padding: 0 6px; border: 1px solid var(--accent); border-radius: 6px; background: var(--card); color: var(--text); font: inherit; font-size: 12.5px; outline: none; box-shadow: var(--ring); }
 
-.restore-offer { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px 20px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: var(--raise-2); color: var(--text); text-align: center; }
 
 .section-title { align-items: center; }
 .section-title .group-edit { opacity: 0; margin-left: 2px; }

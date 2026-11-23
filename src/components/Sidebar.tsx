@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { authLabel, describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Session } from "../lib/sessions";
+import { describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Session } from "../lib/sessions";
 import { IconEdit, IconPlus, IconSearch } from "./Icons";
 
 interface Props {
@@ -74,7 +74,6 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
                     <span className="name">{s.name}</span>
                     <span className="sub">{describeSession(s)}</span>
                   </span>
-                  <span className="badge">{authLabel(s)}</span>
                 </button>
                 <button className="icon-btn ghost edit" aria-label={`${s.name} 편집`} title="편집" onClick={() => onEdit(s)}>
                   <IconEdit width={14} height={14} />

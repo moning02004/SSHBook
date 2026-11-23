@@ -124,7 +124,3 @@ export function describeSession(s: Session): string {
   return `${s.user ? s.user + "@" : ""}${s.host ?? ""}${port}`;
 }
 
-export function authLabel(s: Session): string {
-  if (s.kind === "local") return "로컬";
-  return s.auth === "key" ? "키" : s.auth === "agent" ? "에이전트" : "비밀번호";
-}

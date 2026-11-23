@@ -123,8 +123,6 @@ export function App() {
   const [picker, setPicker] = useState(false);
   const [searchPane, setSearchPane] = useState<string | null>(null);
   const [renamingTab, setRenamingTab] = useState<string | null>(null);
-  /** 잠금 해제했을 때 다시 열 수 있는 지난번 작업 공간 */
-  const [restoreOffer, setRestoreOffer] = useState<desks.SavedWorkspace | null>(null);
   const [sftpPanes, setSftpPanes] = useState<Set<string>>(() => new Set());
   const [snippets, setSnippets] = useState<Snippet[] | null>(null);
   // 창의 연결 상태가 바뀌면 다시 그린다(탭·사이드바의 상태 점).
@@ -666,7 +664,7 @@ export function App() {
   /** 이번에 연 뒤로 탭을 한 번이라도 열었는지(처음 빈 화면을 '모두 닫음'으로 저장하지 않게) */
   const hadTabs = useRef(false);
 
-  // 잠금을 풀면 저장해 둔 배치가 있는지 본다.
+  // 잠금을 풀면 지난번 배치를 바로 보여 준다. 접속은 하지 않고, 탭마다 다시 연결할 때 붙는다.
   useEffect(() => {
     if (!status?.unlocked || !workspaceKey) return;
     skipSave.current = false;
@@ -674,9 +672,14 @@ export function App() {
     try {
       const raw = localStorage.getItem(workspaceKey);
       const saved = raw ? (JSON.parse(raw) as desks.SavedWorkspace) : null;
-      setRestoreOffer(saved?.v === 1 && desks.savedTabCount(saved) > 0 ? saved : null);
+      if (saved?.v !== 1 || desks.savedTabCount(saved) === 0) return;
+      const { desk: next, opened } = desks.restoreWorkspace(saved, (id) => sessions.some((s) => s.id === id), newId);
+      if (!next.root) return;
+      opened.forEach(([id, tab]) => terms.openDisconnected(id, tab.sessionId));
+      setPanes(Object.fromEntries(opened.map(([id, tab]) => [id, { ...infoFor(tab.sessionId), ...(tab.name ? { customTitle: tab.name } : {}) }])));
+      setDesk(next);
     } catch {
-      setRestoreOffer(null);
+      // 저장된 배치가 깨졌으면 빈 화면으로 시작한다.
     }
   }, [status?.unlocked, workspaceKey]);
 
@@ -699,18 +702,6 @@ export function App() {
     }, 400);
     return () => clearTimeout(t);
   }, [desk, panes, status?.unlocked, workspaceKey]);
-
-  const restoreWorkspace = () => {
-    if (!restoreOffer) return;
-    const { desk: next, opened } = desks.restoreWorkspace(restoreOffer, (id) => sessions.some((s) => s.id === id), newId);
-    setRestoreOffer(null);
-    if (!next.root) return setNotice("다시 열 탭이 없습니다(세션이 지워졌습니다).");
-    setPanes((p) => ({
-      ...p,
-      ...Object.fromEntries(opened.map(([id, t]) => [id, { ...infoFor(t.sessionId), ...(t.name ? { customTitle: t.name } : {}) }])),
-    }));
-    setDesk(next);
-  };
 
   // ---- 화면 ----
 
@@ -813,25 +804,6 @@ export function App() {
             />
           ) : (
             <div className="welcome">
-              {restoreOffer && (
-                <div className="restore-offer" role="region" aria-label="지난번 작업 공간">
-                  <div>
-                    <b>지난번 작업 공간</b>
-                    <span className="hint">
-                      {" "}
-                      칸 {Object.values(restoreOffer.groups).filter((g) => g.tabs.length).length}개 · 탭 {desks.savedTabCount(restoreOffer)}개를 다시 연결합니다.
-                    </span>
-                  </div>
-                  <div className="row-gap">
-                    <button className="btn" onClick={() => setRestoreOffer(null)}>
-                      버리기
-                    </button>
-                    <button className="btn primary" autoFocus onClick={restoreWorkspace}>
-                      다시 열기
-                    </button>
-                  </div>
-                </div>
-              )}
               <p>{sidebarHidden ? "사이드바를 펼쳐 세션을 고르거나 로컬 셸을 여세요." : "왼쪽에서 세션을 고르거나 로컬 셸을 여세요."}</p>
               <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 탭에서 {isMac ? "⌘R" : "Ctrl+R"} 다시 연결 · 탭을 끌어 칸 가장자리에 놓으면 분할</p>
               <button className="btn" onClick={() => openTab(null)}>

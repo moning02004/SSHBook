@@ -178,7 +178,7 @@ function readLine(entry: PaneEntry, prompt: string, hidden: boolean, typedOnly =
           return finish(value);
         }
         if (ch === "\x03" || ch === "\x1b") {
-          term.write("^C\r\n");
+          term.write(ch === "\x03" ? "^C\r\n" : "\r\n");
           return finish(null);
         }
         if (ch === "\x7f" || ch === "\b") {
@@ -196,6 +196,44 @@ function readLine(entry: PaneEntry, prompt: string, hidden: boolean, typedOnly =
   });
 }
 
+/** 접속을 시도하는 동안 안내를 보여 주고, ESC·Ctrl+C면 취소한다(취소하면 null). */
+function openCancellable(entry: PaneEntry, opts: OpenOptions): Promise<string | null> {
+  const { term, sessionId } = entry;
+  term.write(`${DIM}연결 중… (ESC로 취소)${RESET}`);
+  return new Promise((resolve, reject) => {
+    let cancelled = false;
+    const cleanup = () => {
+      sub.dispose();
+      entry.cancelPrompt = null;
+      term.write("\r\x1b[2K"); // 안내 줄을 지운다
+    };
+    const cancel = () => {
+      if (cancelled) return;
+      cancelled = true;
+      cleanup();
+      resolve(null);
+    };
+    entry.cancelPrompt = cancel;
+    // 방향키 등은 ESC로 시작하는 여러 글자라서, ESC 하나만 눌렀을 때만 취소한다.
+    const sub = term.onData((d) => {
+      if (d === "\x1b" || d === "\x03") cancel();
+    });
+    api.termOpen(sessionId, term.cols, term.rows, opts).then(
+      (id) => {
+        // 취소한 뒤에 늦게 붙은 연결은 남기지 않는다.
+        if (cancelled) return void api.termClose(id).catch(() => {});
+        cleanup();
+        resolve(id);
+      },
+      (err) => {
+        if (cancelled) return;
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
+
 function fail(entry: PaneEntry, text: string): null {
   setStatus(entry, "closed");
   entry.term.write(`${RED}${text}${RESET} ${DIM}(${RECONNECT_HINT})${RESET}\r\n`);
@@ -204,14 +242,19 @@ function fail(entry: PaneEntry, text: string): null {
 
 /** 접속을 시도하고, 호스트 키 확인이나 비밀번호가 필요하면 터미널에서 물어본 뒤 다시 시도한다. */
 async function connect(entry: PaneEntry): Promise<string | null> {
-  const { term, sessionId } = entry;
+  const { term } = entry;
   const opts: OpenOptions = {};
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
-      const id = await api.termOpen(sessionId, term.cols, term.rows, opts);
+      const id = await openCancellable(entry, opts);
       // 다시 물어본 비밀번호는 더 들고 있지 않는다.
       opts.password = undefined;
       opts.passphrase = undefined;
+      if (entries.get(entry.paneId) !== entry) {
+        if (id) void api.termClose(id).catch(() => {});
+        return null;
+      }
+      if (!id) return fail(entry, "연결을 취소했습니다.");
       bind(id, entry);
       return id;
     } catch (err) {
@@ -233,8 +276,8 @@ async function connect(entry: PaneEntry): Promise<string | null> {
         const code = k.fingerprint.replace(/^SHA256:/, "").slice(0, 8);
         const q =
           k.kind === "changed"
-            ? `서버 관리자에게 새 지문이 맞는지 확인했다면, 지문 앞 8글자(${code})를 입력하세요: `
-            : "이 서버를 신뢰하고 연결할까요? (yes/no) ";
+            ? `서버 관리자에게 새 지문이 맞는지 확인했다면, 지문 앞 8글자(${code})를 입력하세요 (ESC로 취소): `
+            : "이 서버를 신뢰하고 연결할까요? (yes/no, ESC로 취소) ";
         const typed = (await readLine(entry, q, false, true))?.trim();
         if (entries.get(entry.paneId) !== entry) return null;
         const accepted = k.kind === "changed" ? typed === code : typed?.toLowerCase() === "yes";
@@ -245,7 +288,7 @@ async function connect(entry: PaneEntry): Promise<string | null> {
       }
       if ("ask" in r) {
         if (r.ask.message) term.write(`${RED}${r.ask.message}${RESET}\r\n`);
-        const v = await readLine(entry, r.ask.kind === "password" ? "비밀번호: " : "개인 키 암호: ", true);
+        const v = await readLine(entry, r.ask.kind === "password" ? "비밀번호 (ESC로 취소): " : "개인 키 암호 (ESC로 취소): ", true);
         if (entries.get(entry.paneId) !== entry) return null;
         if (v === null) return fail(entry, "연결을 취소했습니다.");
         opts[r.ask.kind] = v;
@@ -262,7 +305,7 @@ export function setShortcutFilter(fn: (e: KeyboardEvent) => boolean) {
   shortcutFilter = fn;
 }
 
-export function getPane(paneId: string, sessionId: string | null): PaneEntry {
+export function getPane(paneId: string, sessionId: string | null, autoConnect = true): PaneEntry {
   const found = entries.get(paneId);
   if (found) return found;
 
@@ -309,9 +352,17 @@ export function getPane(paneId: string, sessionId: string | null): PaneEntry {
     },
     true,
   );
-  start(entry);
+  if (autoConnect) start(entry);
   notify();
   return entry;
+}
+
+/** 지난번 탭을 연결하지 않은 채로 만든다. 사용자가 다시 연결할 때 처음 접속한다. */
+export function openDisconnected(paneId: string, sessionId: string | null) {
+  if (entries.has(paneId)) return;
+  const entry = getPane(paneId, sessionId, false);
+  setStatus(entry, "closed");
+  entry.term.write(`\x1b[2m[지난번 탭 · 연결되지 않음 · ${RECONNECT_HINT}]\x1b[0m\r\n`);
 }
 
 function start(entry: PaneEntry) {
@@ -350,7 +401,7 @@ export function reconnect(paneId: string): boolean {
       await api.termClose(old).catch(() => {});
     }
     if (!entries.has(paneId)) return;
-    e.term.write(`\r\n${DIM}다시 연결합니다…${RESET}\r\n`);
+    e.term.write("\r\n");
     start(e);
   })();
   return true;
