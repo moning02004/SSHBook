@@ -10,6 +10,7 @@ import { api, parseOpenError, type OpenOptions } from "./api";
 import { pasteWarning, sanitizePaste } from "./paste";
 import { fontStack, getSettings, subscribeSettings, type Settings } from "./settings";
 import { terminalThemes, type ThemeName } from "./theme";
+import { tx } from "./i18n";
 
 const termOptions = (s: Settings) => ({
   fontFamily: fontStack(s.fontFamily),
@@ -115,11 +116,11 @@ const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const early = new Map<string, Uint8Array[]>();
 const earlyExit = new Map<string, number | null>();
 
-const RECONNECT_HINT = `${navigator.platform.toLowerCase().includes("mac") ? "⌘R" : "Ctrl+R"}로 다시 연결`;
+const RECONNECT_HINT = tx("{0}로 다시 연결", navigator.platform.toLowerCase().includes("mac") ? "⌘R" : "Ctrl+R");
 
 function showExit(e: PaneEntry, code: number | null) {
   setStatus(e, "closed");
-  e.term.write(`\r\n\x1b[2m[연결 종료${code === null ? "" : ` · 코드 ${code}`} · ${RECONNECT_HINT}]\x1b[0m\r\n`);
+  e.term.write(tx("\r\n\u001b[2m[연결 종료{0} · {1}]\u001b[0m\r\n", code === null ? "" : tx(" · 코드 {0}", code), RECONNECT_HINT));
 }
 
 let wired = false;
@@ -215,7 +216,7 @@ async function answerAuth(req: AuthPrompt) {
   const answers: string[] = [];
   let cancelled = false;
   for (const p of req.prompts) {
-    const v = await readLine(e, `${p.text || "인증 코드:"} ${DIM}(ESC로 취소)${RESET} `, !p.echo);
+    const v = await readLine(e, tx("{0} {1}(ESC로 취소){2} ", p.text || tx("인증 코드:"), DIM, RESET), !p.echo);
     if (v === null) {
       cancelled = true;
       break;
@@ -229,14 +230,14 @@ async function answerAuth(req: AuthPrompt) {
     cancelOpen?.();
     return;
   }
-  e.term.write(`${DIM}연결 중… (ESC로 취소)${RESET}`);
+  e.term.write(tx("{0}연결 중… (ESC로 취소){1}", DIM, RESET));
   void api.termAuthAnswer(req.id, answers);
 }
 
 /** 접속을 시도하는 동안 안내를 보여 주고, ESC·Ctrl+C면 취소한다(취소하면 null). */
 function openCancellable(entry: PaneEntry, opts: OpenOptions): Promise<string | null> {
   const { term, sessionId } = entry;
-  term.write(`${DIM}연결 중… (ESC로 취소)${RESET}`);
+  term.write(tx("{0}연결 중… (ESC로 취소){1}", DIM, RESET));
   return new Promise((resolve, reject) => {
     let cancelled = false;
     const cleanup = () => {
@@ -292,7 +293,7 @@ async function connect(entry: PaneEntry): Promise<string | null> {
         if (id) void api.termClose(id).catch(() => {});
         return null;
       }
-      if (!id) return fail(entry, "연결을 취소했습니다.");
+      if (!id) return fail(entry, tx("연결을 취소했습니다."));
       bind(id, entry);
       return id;
     } catch (err) {
@@ -303,39 +304,39 @@ async function connect(entry: PaneEntry): Promise<string | null> {
         const k = r.hostKey;
         if (k.kind === "changed") {
           term.write(
-            `${RED}경고: ${k.hostId}의 호스트 키가 저장된 것과 다릅니다.${RESET}\r\n` +
-              `서버를 다시 설치했거나 키를 바꾼 게 아니라면, 누군가 연결을 가로채고 있을 수 있습니다.\r\n`,
+            tx("{0}경고: {1}의 호스트 키가 저장된 것과 다릅니다.{2}\r\n", RED, k.hostId, RESET) +
+              tx("서버를 다시 설치했거나 키를 바꾼 게 아니라면, 누군가 연결을 가로채고 있을 수 있습니다.\r\n"),
           );
         } else {
-          term.write(`처음 연결하는 서버입니다: ${k.hostId}\r\n`);
+          term.write(tx("처음 연결하는 서버입니다: {0}\r\n", k.hostId));
         }
-        term.write(`${DIM}${k.algorithm} 키 지문${RESET} ${k.fingerprint}\r\n`);
+        term.write(tx("{0}{1} 키 지문{2} {3}\r\n", DIM, k.algorithm, RESET, k.fingerprint));
         // 키가 바뀐 경우는 중간자 공격일 수 있어서, 지문을 직접 보고 치게 한다.
         const code = k.fingerprint.replace(/^SHA256:/, "").slice(0, 8);
         const q =
           k.kind === "changed"
-            ? `서버 관리자에게 새 지문이 맞는지 확인했다면, 지문 앞 8글자(${code})를 입력하세요 (ESC로 취소): `
-            : "이 서버를 신뢰하고 연결할까요? (yes/no, ESC로 취소) ";
+            ? tx("서버 관리자에게 새 지문이 맞는지 확인했다면, 지문 앞 8글자({0})를 입력하세요 (ESC로 취소): ", code)
+            : tx("이 서버를 신뢰하고 연결할까요? (yes/no, ESC로 취소) ");
         const typed = (await readLine(entry, q, false, true))?.trim();
         if (entries.get(entry.paneId) !== entry) return null;
         const accepted = k.kind === "changed" ? typed === code : typed?.toLowerCase() === "yes";
-        if (!accepted) return fail(entry, "연결을 취소했습니다.");
+        if (!accepted) return fail(entry, tx("연결을 취소했습니다."));
         await api.hostTrust(k.hostId, k.fingerprint);
-        term.write(`${DIM}호스트 키를 보관함에 저장했습니다.${RESET}\r\n`);
+        term.write(tx("{0}호스트 키를 보관함에 저장했습니다.{1}\r\n", DIM, RESET));
         continue;
       }
       if ("ask" in r) {
         if (r.ask.message) term.write(`${RED}${r.ask.message}${RESET}\r\n`);
-        const v = await readLine(entry, r.ask.kind === "password" ? "비밀번호 (ESC로 취소): " : "개인 키 암호 (ESC로 취소): ", true);
+        const v = await readLine(entry, r.ask.kind === "password" ? tx("비밀번호 (ESC로 취소): ") : tx("개인 키 암호 (ESC로 취소): "), true);
         if (entries.get(entry.paneId) !== entry) return null;
-        if (v === null) return fail(entry, "연결을 취소했습니다.");
+        if (v === null) return fail(entry, tx("연결을 취소했습니다."));
         opts[r.ask.kind] = v;
         continue;
       }
-      return fail(entry, `연결하지 못했습니다: ${r.text}`);
+      return fail(entry, tx("연결하지 못했습니다: {0}", r.text));
     }
   }
-  return fail(entry, "연결하지 못했습니다: 시도 횟수를 넘었습니다.");
+  return fail(entry, tx("연결하지 못했습니다: 시도 횟수를 넘었습니다."));
 }
 
 /** 앱 단축키(분할 등)는 xterm이 셸로 보내지 않도록 걸러낸다. */
@@ -402,7 +403,7 @@ export function openDisconnected(paneId: string, sessionId: string | null) {
   if (entries.has(paneId)) return;
   const entry = getPane(paneId, sessionId, false);
   setStatus(entry, "closed");
-  entry.term.write(`\x1b[2m[지난번 탭 · 연결되지 않음 · ${RECONNECT_HINT}]\x1b[0m\r\n`);
+  entry.term.write(tx("\u001b[2m[지난번 탭 · 연결되지 않음 · {0}]\u001b[0m\r\n", RECONNECT_HINT));
 }
 
 function start(entry: PaneEntry) {

@@ -24,6 +24,7 @@ import { emptyDesk, type Desk, type TabDrop } from "./lib/groups";
 import { describeSession, type Session, type Snippet } from "./lib/sessions";
 import * as terms from "./lib/terminals";
 import { applyTheme, loadTheme, type ThemeName } from "./lib/theme";
+import { tx } from "./lib/i18n";
 
 const MAX_PANES = 8;
 const newId = () => crypto.randomUUID();
@@ -98,7 +99,7 @@ interface DragState {
   grab: { dx: number; dy: number; width: number };
   target: DropTarget;
 }
-const SIDE_LABEL: Record<DropSide, string> = { left: "왼쪽에 분할", right: "오른쪽에 분할", top: "위에 분할", bottom: "아래에 분할" };
+const SIDE_LABEL: Record<DropSide, string> = { left: tx("왼쪽에 분할"), right: tx("오른쪽에 분할"), top: tx("위에 분할"), bottom: tx("아래에 분할") };
 /** 이만큼 움직여야 끌기로 본다(그 전에는 그냥 클릭) */
 const DRAG_START_PX = 5;
 
@@ -176,7 +177,7 @@ export function App() {
     const s = list.find((x) => x.id === sessionId);
     return s
       ? { sessionId: s.id, title: s.name, sub: describeSession(s), color: s.color ?? null, ssh: s.kind === "ssh" }
-      : { sessionId: null, title: "로컬 셸", sub: "기본 셸" };
+      : { sessionId: null, title: tx("로컬 셸"), sub: tx("기본 셸") };
   };
 
   // 세션을 고치면(이름·색 등) 열린 창의 머리글도 바로 바꾼다.
@@ -205,7 +206,7 @@ export function App() {
   }, [desk.broadcast, visibleKey]);
 
   const toggleBroadcast = () => {
-    if (desks.visibleTabs(desk).length < 2) return setNotice("동시 입력은 칸을 둘 이상으로 나눴을 때 씁니다.");
+    if (desks.visibleTabs(desk).length < 2) return setNotice(tx("동시 입력은 칸을 둘 이상으로 나눴을 때 씁니다."));
     setDesk((d) => ({ ...d, broadcast: !d.broadcast }));
   };
   const toggleSftp = (paneId: string) =>
@@ -220,7 +221,7 @@ export function App() {
     try {
       setSnippets(await api.snippetsList());
     } catch (e) {
-      setNotice(`명령 모음을 열지 못했습니다: ${errorText(e)}`);
+      setNotice(tx("명령 모음을 열지 못했습니다: {0}", errorText(e)));
     }
   };
   const closeSnippets = () => {
@@ -244,7 +245,7 @@ export function App() {
     return ids;
   };
 
-  const fullNotice = () => setNotice(`칸은 ${MAX_PANES}개까지 나눌 수 있습니다.`);
+  const fullNotice = () => setNotice(tx("칸은 {0}개까지 나눌 수 있습니다.", MAX_PANES));
 
   /** 이 탭의 칸 옆에 새 칸을 만들고 같은 세션으로 새로 연결한다. */
   const doSplit = (paneId: string, dir: SplitDir) => {
@@ -310,7 +311,7 @@ export function App() {
       case "clear": return terms.clearPane(paneId);
       case "search": return setSearchPane(paneId);
       case "broadcast": return toggleBroadcast();
-      case "sftp": return panes[paneId]?.ssh ? toggleSftp(paneId) : setNotice("파일 창은 SSH 세션에서만 열 수 있습니다.");
+      case "sftp": return panes[paneId]?.ssh ? toggleSftp(paneId) : setNotice(tx("파일 창은 SSH 세션에서만 열 수 있습니다."));
       case "tab-next": return setDesk((d) => desks.cycleTab(d, 1));
       case "tab-prev": return setDesk((d) => desks.cycleTab(d, -1));
     }
@@ -373,24 +374,24 @@ export function App() {
     const ssh = !!panes[paneId]?.ssh;
     const closed = terms.paneStatus(paneId) === "closed";
     return [
-      ...(closed ? ([{ label: "다시 연결", shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => void terms.reconnect(paneId) }, "separator"] as MenuItem[]) : []),
-      { label: "오른쪽으로 분할", shortcut: "Alt+Shift+→", disabled: full, onSelect: () => doSplit(paneId, "row") },
-      { label: "아래로 분할", shortcut: "Alt+Shift+↓", disabled: full, onSelect: () => doSplit(paneId, "column") },
-      { label: "4분할로 나누기", disabled: groupCount + 3 > MAX_PANES, onSelect: () => doQuad(paneId) },
+      ...(closed ? ([{ label: tx("다시 연결"), shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => void terms.reconnect(paneId) }, "separator"] as MenuItem[]) : []),
+      { label: tx("오른쪽으로 분할"), shortcut: "Alt+Shift+→", disabled: full, onSelect: () => doSplit(paneId, "row") },
+      { label: tx("아래로 분할"), shortcut: "Alt+Shift+↓", disabled: full, onSelect: () => doSplit(paneId, "column") },
+      { label: tx("4분할로 나누기"), disabled: groupCount + 3 > MAX_PANES, onSelect: () => doQuad(paneId) },
       "separator",
-      { label: desk.zoomed ? "분할 화면으로 돌아가기" : "이 칸만 크게 보기", shortcut: `${K}Z`, disabled: !multi, onSelect: () => doZoom(paneId) },
-      { label: "분할 해제 · 모든 탭을 한 칸으로", disabled: !multi, onSelect: doUnsplit },
-      { label: desk.broadcast ? "동시 입력 끄기" : "동시 입력 켜기 · 보이는 모든 칸", shortcut: `${K}I`, disabled: !multi, onSelect: toggleBroadcast },
+      { label: desk.zoomed ? tx("분할 화면으로 돌아가기") : tx("이 칸만 크게 보기"), shortcut: `${K}Z`, disabled: !multi, onSelect: () => doZoom(paneId) },
+      { label: tx("분할 해제 · 모든 탭을 한 칸으로"), disabled: !multi, onSelect: doUnsplit },
+      { label: desk.broadcast ? tx("동시 입력 끄기") : tx("동시 입력 켜기 · 보이는 모든 칸"), shortcut: `${K}I`, disabled: !multi, onSelect: toggleBroadcast },
       "separator",
-      { label: "찾기", shortcut: isMac ? "⌘F" : `${K}F`, onSelect: () => setSearchPane(paneId) },
-      { label: "명령 모음…", shortcut: `${K}S`, onSelect: () => void openSnippets() },
-      ...(ssh ? ([{ label: sftpPanes.has(paneId) ? "파일 창 닫기" : "파일 창 열기 (SFTP)", shortcut: `${K}O`, onSelect: () => toggleSftp(paneId) }] as MenuItem[]) : []),
+      { label: tx("찾기"), shortcut: isMac ? "⌘F" : `${K}F`, onSelect: () => setSearchPane(paneId) },
+      { label: tx("명령 모음…"), shortcut: `${K}S`, onSelect: () => void openSnippets() },
+      ...(ssh ? ([{ label: sftpPanes.has(paneId) ? tx("파일 창 닫기") : tx("파일 창 열기 (SFTP)"), shortcut: `${K}O`, onSelect: () => toggleSftp(paneId) }] as MenuItem[]) : []),
       "separator",
-      { label: "복사", shortcut: `${K}C`, onSelect: () => terms.copySelection(paneId) },
-      { label: "붙여넣기", shortcut: `${K}V`, onSelect: () => void terms.pasteInto(paneId) },
-      { label: "화면 지우기", shortcut: `${K}K`, onSelect: () => terms.clearPane(paneId) },
+      { label: tx("복사"), shortcut: `${K}C`, onSelect: () => terms.copySelection(paneId) },
+      { label: tx("붙여넣기"), shortcut: `${K}V`, onSelect: () => void terms.pasteInto(paneId) },
+      { label: tx("화면 지우기"), shortcut: `${K}K`, onSelect: () => terms.clearPane(paneId) },
       "separator",
-      { label: g && g.tabs.length > 1 ? "탭 닫기" : "칸 닫기", shortcut: isMac ? "⌘W" : `${K}W`, danger: true, onSelect: () => closeTab(paneId) },
+      { label: g && g.tabs.length > 1 ? tx("탭 닫기") : tx("칸 닫기"), shortcut: isMac ? "⌘W" : `${K}W`, danger: true, onSelect: () => closeTab(paneId) },
     ];
   };
 
@@ -403,22 +404,22 @@ export function App() {
     const alone = g.tabs.length === 1;
     const closed = terms.paneStatus(paneId) === "closed";
     return [
-      { label: "같은 세션을 새 탭으로", onSelect: () => openTab(panes[paneId]?.sessionId ?? null, undefined, g.id) },
-      { label: "탭 이름 바꾸기…", shortcut: "더블클릭", onSelect: () => setRenamingTab(paneId) },
-      ...(closed ? ([{ label: "다시 연결", shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => terms.reconnect(paneId) }] as MenuItem[]) : []),
+      { label: tx("같은 세션을 새 탭으로"), onSelect: () => openTab(panes[paneId]?.sessionId ?? null, undefined, g.id) },
+      { label: tx("탭 이름 바꾸기…"), shortcut: tx("더블클릭"), onSelect: () => setRenamingTab(paneId) },
+      ...(closed ? ([{ label: tx("다시 연결"), shortcut: isMac ? "⌘R" : "Ctrl+R", onSelect: () => terms.reconnect(paneId) }] as MenuItem[]) : []),
       "separator",
-      { label: "오른쪽으로 분할 · 새로 연결", disabled: full, onSelect: () => doSplit(paneId, "row") },
-      { label: "아래로 분할 · 새로 연결", disabled: full, onSelect: () => doSplit(paneId, "column") },
-      { label: "오른쪽 칸으로 옮기기", disabled: full || alone, onSelect: () => moveToSplit(paneId, "right") },
-      { label: "아래 칸으로 옮기기", disabled: full || alone, onSelect: () => moveToSplit(paneId, "bottom") },
-      ...(groupCount > 1 ? ([{ label: "분할 해제 · 모든 탭을 한 칸으로", onSelect: doUnsplit }] as MenuItem[]) : []),
+      { label: tx("오른쪽으로 분할 · 새로 연결"), disabled: full, onSelect: () => doSplit(paneId, "row") },
+      { label: tx("아래로 분할 · 새로 연결"), disabled: full, onSelect: () => doSplit(paneId, "column") },
+      { label: tx("오른쪽 칸으로 옮기기"), disabled: full || alone, onSelect: () => moveToSplit(paneId, "right") },
+      { label: tx("아래 칸으로 옮기기"), disabled: full || alone, onSelect: () => moveToSplit(paneId, "bottom") },
+      ...(groupCount > 1 ? ([{ label: tx("분할 해제 · 모든 탭을 한 칸으로"), onSelect: doUnsplit }] as MenuItem[]) : []),
       "separator",
-      { label: "탭 닫기", shortcut: isMac ? "⌘W" : undefined, onSelect: () => closeTab(paneId) },
-      { label: "다른 탭 모두 닫기", disabled: alone, onSelect: () => closeTabs(g.tabs.filter((t) => t !== paneId)) },
-      { label: "왼쪽 탭 모두 닫기", disabled: i === 0, onSelect: () => closeTabs(g.tabs.slice(0, i)) },
-      { label: "오른쪽 탭 모두 닫기", disabled: i === g.tabs.length - 1, onSelect: () => closeTabs(g.tabs.slice(i + 1)) },
+      { label: tx("탭 닫기"), shortcut: isMac ? "⌘W" : undefined, onSelect: () => closeTab(paneId) },
+      { label: tx("다른 탭 모두 닫기"), disabled: alone, onSelect: () => closeTabs(g.tabs.filter((t) => t !== paneId)) },
+      { label: tx("왼쪽 탭 모두 닫기"), disabled: i === 0, onSelect: () => closeTabs(g.tabs.slice(0, i)) },
+      { label: tx("오른쪽 탭 모두 닫기"), disabled: i === g.tabs.length - 1, onSelect: () => closeTabs(g.tabs.slice(i + 1)) },
       "separator",
-      { label: groupCount > 1 ? "이 칸의 탭 모두 닫기" : "모든 탭 닫기", danger: true, onSelect: () => closeTabs(g.tabs) },
+      { label: groupCount > 1 ? tx("이 칸의 탭 모두 닫기") : tx("모든 탭 닫기"), danger: true, onSelect: () => closeTabs(g.tabs) },
     ];
   };
 
@@ -516,7 +517,7 @@ export function App() {
       const live = Object.keys(all).filter(terms.isLive);
       if (!ask || live.length === 0) return;
       e.preventDefault();
-      setConfirm({ names: [...new Set(live.map((id) => all[id]?.title ?? "터미널"))], run: () => void w.destroy() });
+      setConfirm({ names: [...new Set(live.map((id) => all[id]?.title ?? tx("터미널")))], run: () => void w.destroy() });
     });
     return () => void un.then((f) => f());
   }, []);
@@ -564,9 +565,9 @@ export function App() {
       const copy = await api.sessionDuplicate(s.id);
       setSessions(await api.sessionsList());
       setEditing({ session: copy });
-      setNotice(`'${copy.name}'을 만들었습니다. 호스트만 바꿔 저장하세요.`);
+      setNotice(tx("'{0}'을 만들었습니다. 호스트만 바꿔 저장하세요.", copy.name));
     } catch (e) {
-      setNotice(`복제하지 못했습니다: ${errorText(e)}`);
+      setNotice(tx("복제하지 못했습니다: {0}", errorText(e)));
     }
   };
 
@@ -580,7 +581,7 @@ export function App() {
   };
 
   const deleteSession = async (s: Session) => {
-    if (!window.confirm(`'${s.name}' 세션을 지울까요? 보관함에 저장된 비밀번호와 키도 함께 지워집니다.`)) return;
+    if (!window.confirm(tx("'{0}' 세션을 지울까요? 보관함에 저장된 비밀번호와 키도 함께 지워집니다.", s.name))) return;
     await api.sessionDelete(s.id);
     setSessions(await api.sessionsList());
     setEditing(null);
@@ -620,9 +621,9 @@ export function App() {
       const dest = await pickExportPath();
       if (!dest) return;
       await api.vaultExport(dest, password);
-      setNotice(`보관함 파일을 내보냈습니다: ${dest}`);
+      setNotice(tx("보관함 파일을 내보냈습니다: {0}", dest));
     } catch (e) {
-      setNotice(`내보내지 못했습니다: ${errorText(e)}`);
+      setNotice(tx("내보내지 못했습니다: {0}", errorText(e)));
     }
   };
 
@@ -650,7 +651,7 @@ export function App() {
   const openLogs = async () => {
     try {
       const dir = await api.openLogsDir();
-      setNotice(`세션 기록 폴더: ${dir}`);
+      setNotice(tx("세션 기록 폴더: {0}", dir));
     } catch (e) {
       setNotice(errorText(e));
     }
@@ -716,8 +717,8 @@ export function App() {
         <button
           className="icon-btn ghost"
           aria-pressed={!sidebarHidden}
-          aria-label={sidebarHidden ? "사이드바 펼치기" : "사이드바 접기"}
-          title={`${sidebarHidden ? "사이드바 펼치기" : "사이드바 접기"} (${K}B)`}
+          aria-label={sidebarHidden ? tx("사이드바 펼치기") : tx("사이드바 접기")}
+          title={`${sidebarHidden ? tx("사이드바 펼치기") : tx("사이드바 접기")} (${K}B)`}
           onClick={toggleSidebar}
         >
           <IconSidebar />
@@ -730,20 +731,20 @@ export function App() {
         {inTauri && (
           <button
             className="icon-btn"
-            aria-label={fullscreen ? "전체 화면 끝내기" : "전체 화면"}
-            title={`${fullscreen ? "전체 화면 끝내기" : "전체 화면"} (F11)`}
+            aria-label={fullscreen ? tx("전체 화면 끝내기") : tx("전체 화면")}
+            title={`${fullscreen ? tx("전체 화면 끝내기") : tx("전체 화면")} (F11)`}
             onClick={() => void toggleFullscreen()}
           >
             {fullscreen ? <IconShrink /> : <IconExpand />}
           </button>
         )}
-        <button className="icon-btn" aria-label="설정" title={`설정 (${isMac ? "⌘" : "Ctrl+"},)`} onClick={() => setShowSettings(true)}>
+        <button className="icon-btn" aria-label={tx("설정")} title={tx("설정 ({0},)", isMac ? "⌘" : "Ctrl+")} onClick={() => setShowSettings(true)}>
           <IconSettings />
         </button>
         <button
           className="icon-btn"
-          aria-label={theme === "light" ? "다크 모드로 전환" : "라이트 모드로 전환"}
-          title={theme === "light" ? "다크 모드로 전환" : "라이트 모드로 전환"}
+          aria-label={theme === "light" ? tx("다크 모드로 전환") : tx("라이트 모드로 전환")}
+          title={theme === "light" ? tx("다크 모드로 전환") : tx("라이트 모드로 전환")}
           onClick={() => setTheme(theme === "light" ? "dark" : "light")}
         >
           {theme === "light" ? <IconMoon /> : <IconSun />}
@@ -764,7 +765,7 @@ export function App() {
                 await api.sessionsRenameGroup(from, to);
                 setSessions(await api.sessionsList());
               } catch (e) {
-                setNotice(`그룹 이름을 바꾸지 못했습니다: ${errorText(e)}`);
+                setNotice(tx("그룹 이름을 바꾸지 못했습니다: {0}", errorText(e)));
               }
             }}
           />
@@ -804,10 +805,10 @@ export function App() {
             />
           ) : (
             <div className="welcome">
-              <p>{sidebarHidden ? "사이드바를 펼쳐 세션을 고르거나 로컬 셸을 여세요." : "왼쪽에서 세션을 고르거나 로컬 셸을 여세요."}</p>
-              <p className="hint">{isMac ? "⌘D" : "Alt+D"} 호스트 목록 · 연결이 끊긴 탭에서 {isMac ? "⌘R" : "Ctrl+R"} 다시 연결 · 탭을 끌어 칸 가장자리에 놓으면 분할</p>
+              <p>{sidebarHidden ? tx("사이드바를 펼쳐 세션을 고르거나 로컬 셸을 여세요.") : tx("왼쪽에서 세션을 고르거나 로컬 셸을 여세요.")}</p>
+              <p className="hint">{isMac ? "⌘D" : "Alt+D"}{" "}{tx("호스트 목록 · 연결이 끊긴 탭에서")}{" "}{isMac ? "⌘R" : "Ctrl+R"}{" "}{tx("다시 연결 · 탭을 끌어 칸 가장자리에 놓으면 분할")}</p>
               <button className="btn" onClick={() => openTab(null)}>
-                <IconPrompt width={14} height={14} /> 로컬 셸 열기
+                <IconPrompt width={14} height={14} />{" "}{tx("로컬 셸 열기")}
               </button>
             </div>
           )}
@@ -857,7 +858,7 @@ export function App() {
           </div>
           {drag.target && (
             <div className="drag-where" style={{ left: drag.x - drag.grab.dx, top: drag.y - drag.grab.dy + 36 }} aria-hidden>
-              {drag.target.kind === "edge" ? SIDE_LABEL[drag.target.side] : drag.target.center ? "이 칸의 탭으로" : "여기로 옮기기"}
+              {drag.target.kind === "edge" ? SIDE_LABEL[drag.target.side] : drag.target.center ? tx("이 칸의 탭으로") : tx("여기로 옮기기")}
             </div>
           )}
         </>

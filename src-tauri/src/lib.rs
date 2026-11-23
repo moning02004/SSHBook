@@ -1,6 +1,7 @@
 mod applog;
 mod forward;
 mod fsperm;
+mod i18n;
 #[cfg(test)]
 mod it_tests;
 mod nopass;
@@ -694,6 +695,16 @@ fn term_auth_answer(state: State<'_, AppState>, id: String, answers: Option<Vec<
     }
 }
 
+/// 화면 언어를 저장한다. 메뉴는 다음 실행부터 바뀐다.
+#[tauri::command]
+fn app_set_language(app: AppHandle, lang: String) -> CmdResult<()> {
+    let lang = if lang == "en" { "en" } else { "ko" };
+    i18n::set_language(lang);
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("language"), lang).map_err(|e| e.to_string())
+}
+
 /// `~/.ssh/config`의 호스트 목록(가져오기 화면용)
 #[tauri::command]
 fn ssh_config_hosts(state: State<'_, AppState>) -> CmdResult<Vec<sshconfig::ConfigHost>> {
@@ -941,12 +952,12 @@ fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
     )?;
     let file = Submenu::with_items(
         app,
-        "파일",
+        i18n::tr("파일"),
         true,
         &[&MenuItem::with_id(
             app,
             MENU_CLOSE_TAB,
-            "탭 닫기",
+            i18n::tr("탭 닫기"),
             true,
             Some("CmdOrCtrl+W"),
         )?],
@@ -954,7 +965,7 @@ fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
     // 편집 메뉴가 있어야 입력칸에서 ⌘C·⌘V·⌘A가 동작한다.
     let edit = Submenu::with_items(
         app,
-        "편집",
+        i18n::tr("편집"),
         true,
         &[
             &PredefinedMenuItem::undo(app, None)?,
@@ -968,7 +979,7 @@ fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
     )?;
     let window = Submenu::with_items(
         app,
-        "윈도우",
+        i18n::tr("윈도우"),
         true,
         &[
             &PredefinedMenuItem::minimize(app, None)?,
@@ -988,6 +999,9 @@ pub fn run() {
         .setup(|app| {
             if let Ok(dir) = logs_dir(app.handle()) {
                 applog::init(dir);
+            }
+            if let Ok(dir) = app.path().app_config_dir() {
+                i18n::load(&dir.join("language"));
             }
             #[cfg(target_os = "macos")]
             app.set_menu(app_menu(app.handle())?)?;
@@ -1042,6 +1056,7 @@ pub fn run() {
             term_resize,
             term_close,
             term_auth_answer,
+            app_set_language,
             ssh_config_hosts,
         ])
         .run(tauri::generate_context!())

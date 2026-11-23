@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Session } from "../lib/sessions";
 import { IconEdit, IconPlus, IconSearch } from "./Icons";
+import { tx } from "../lib/i18n";
 
 interface Props {
   sessions: Session[];
@@ -24,15 +25,15 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
       <div className="sidebar-top">
         <label className="search">
           <IconSearch width={14} height={14} />
-          <input aria-label="세션 검색" placeholder="세션 검색" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <input aria-label={tx("세션 검색")} placeholder={tx("세션 검색")} value={query} onChange={(e) => setQuery(e.target.value)} />
         </label>
         <button className="btn primary" onClick={onNew}>
-          <IconPlus width={14} height={14} /> 새 세션
+          <IconPlus width={14} height={14} />{" "}{tx("새 세션")}
         </button>
       </div>
 
-      <nav className="session-list" aria-label="저장된 세션">
-        {sessions.length === 0 && <p className="empty">저장된 세션이 없습니다. '새 세션'으로 SSH 서버를 추가하세요.</p>}
+      <nav className="session-list" aria-label={tx("저장된 세션")}>
+        {sessions.length === 0 && <p className="empty">{tx("저장된 세션이 없습니다. '새 세션'으로 SSH 서버를 추가하세요.")}</p>}
         {sections.map((sec) => (
           <div key={sec.title ?? "_all"}>
             {sec.title && (
@@ -40,7 +41,7 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
                 {renaming === sec.title ? (
                   <input
                     className="group-rename"
-                    aria-label="그룹 이름"
+                    aria-label={tx("그룹 이름")}
                     autoFocus
                     defaultValue={sec.title}
                     onFocus={(e) => e.currentTarget.select()}
@@ -58,7 +59,7 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
                   <>
                     <span>{sec.title}</span> <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
                     {sec.title !== UNGROUPED_LABEL && (
-                      <button className="icon-btn ghost xs group-edit" aria-label={`${sec.title} 그룹 이름 바꾸기`} title="그룹 이름 바꾸기 (더블클릭)" onClick={() => setRenaming(sec.title)}>
+                      <button className="icon-btn ghost xs group-edit" aria-label={tx("{0} 그룹 이름 바꾸기", sec.title)} title={tx("그룹 이름 바꾸기 (더블클릭)")} onClick={() => setRenaming(sec.title)}>
                         <IconEdit width={11} height={11} />
                       </button>
                     )}
@@ -68,14 +69,14 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
             )}
             {sec.sessions.map((s) => (
               <div key={s.id} className={`session-row${s.id === selectedId ? " selected" : ""}${s.color ? ` env-row env-${s.color}` : ""}`}>
-                <button className="session" onClick={() => onOpen(s)} title={`${s.name} 연결`}>
+                <button className="session" onClick={() => onOpen(s)} title={tx("{0} 연결", s.name)}>
                   <span className={`dot${connected.has(s.id) ? " on" : ""}`} />
                   <span className="meta">
                     <span className="name">{s.name}</span>
                     <span className="sub">{describeSession(s)}</span>
                   </span>
                 </button>
-                <button className="icon-btn ghost edit" aria-label={`${s.name} 편집`} title="편집" onClick={() => onEdit(s)}>
+                <button className="icon-btn ghost edit" aria-label={tx("{0} 편집", s.name)} title={tx("편집")} onClick={() => onEdit(s)}>
                   <IconEdit width={14} height={14} />
                 </button>
               </div>

@@ -1,4 +1,5 @@
 import type { KeyboardEvent } from "react";
+import { tx } from "../lib/i18n";
 
 interface Props<T extends string> {
   /** [id, 보이는 이름] */
@@ -42,7 +43,7 @@ export function SideTabs<T extends string>({ tabs, active, onPick, idPrefix, pan
           onClick={() => onPick(id)}
         >
           {text}
-          {isMarked?.(id) && <span className="nav-dot" role="img" aria-label="설정됨" title="설정됨" />}
+          {isMarked?.(id) && <span className="nav-dot" role="img" aria-label={tx("설정됨")} title={tx("설정됨")} />}
         </button>
       ))}
     </nav>

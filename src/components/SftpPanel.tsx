@@ -4,6 +4,7 @@ import { api, errorText, inTauri, TRANSFER_CANCELLED, type RemoteEntry, type Sft
 import { pickFolder, pickSavePath, pickUploadFiles } from "../lib/dialogs";
 import * as terms from "../lib/terminals";
 import { IconClose, IconDownload, IconEdit, IconFile, IconFolder, IconFolderPlus, IconRefresh, IconTarget, IconTrash, IconUp, IconUpload } from "./Icons";
+import { tx } from "../lib/i18n";
 
 interface Props {
   paneId: string;
@@ -99,7 +100,7 @@ export function SftpPanel({ paneId, onClose }: Props) {
     if (!termId) return;
     const cwd = await api.sftpCwd(termId).catch(() => null);
     if (cwd) return load(cwd);
-    if (fromButton) setMessage({ text: "터미널의 지금 폴더를 알 수 없습니다(리눅스 서버에서만 됩니다).", error: true });
+    if (fromButton) setMessage({ text: tx("터미널의 지금 폴더를 알 수 없습니다(리눅스 서버에서만 됩니다)."), error: true });
     else await load("");
   };
 
@@ -125,12 +126,12 @@ export function SftpPanel({ paneId, onClose }: Props) {
   /** 파일·폴더를 지금 폴더로 올린다(폴더는 안의 것까지 모두). */
   const upload = async (locals: string[]) => {
     if (!termId || locals.length === 0 || transfer) return;
-    const label = locals.length === 1 ? `${baseName(locals[0])} 올리는 중` : `${locals.length}개 올리는 중`;
+    const label = locals.length === 1 ? tx("{0} 올리는 중", baseName(locals[0])) : tx("{0}개 올리는 중", locals.length);
     const dir = path;
     await runTransfer(label, async (id) => {
       try {
         const n = await api.sftpUpload(termId, locals, dir, id);
-        return `파일 ${n}개를 올렸습니다.`;
+        return tx("파일 {0}개를 올렸습니다.", n);
       } finally {
         await load(dir);
       }
@@ -140,9 +141,9 @@ export function SftpPanel({ paneId, onClose }: Props) {
   /** 파일은 저장할 곳을, 폴더는 내려받을 폴더를 골라 내려받는다. */
   const download = async (e: RemoteEntry) => {
     if (!termId || transfer) return;
-    const dest = e.isDir ? await pickFolder(`'${e.name}' 폴더를 내려받을 곳`) : await pickSavePath(e.name);
+    const dest = e.isDir ? await pickFolder(tx("'{0}' 폴더를 내려받을 곳", e.name)) : await pickSavePath(e.name);
     if (!dest) return;
-    await runTransfer(`${e.name} 내려받는 중`, async (id) => {
+    await runTransfer(tx("{0} 내려받는 중", e.name), async (id) => {
       const remote = joinPath(path, e.name);
       let n: number;
       try {
@@ -151,36 +152,36 @@ export function SftpPanel({ paneId, onClose }: Props) {
       } catch (err) {
         const text = errorText(err);
         if (!text.startsWith("exists:")) throw err;
-        if (!window.confirm(`'${text.slice(7)}' 폴더가 이미 있습니다.\n같은 이름의 파일을 덮어쓸까요?`)) return "내려받기를 취소했습니다.";
+        if (!window.confirm(tx("'{0}' 폴더가 이미 있습니다.\n같은 이름의 파일을 덮어쓸까요?", text.slice(7)))) return tx("내려받기를 취소했습니다.");
         n = await api.sftpDownload(termId, remote, dest, true, true, id);
       }
-      return `내려받았습니다 (${humanSize(n)}): ${e.isDir ? `${dest}/${e.name}` : dest}`;
+      return tx("내려받았습니다 ({0}): {1}", humanSize(n), e.isDir ? `${dest}/${e.name}` : dest);
     });
   };
 
   const open = (e: RemoteEntry) => (e.isDir || e.isLink ? void load(joinPath(path, e.name)) : void download(e));
 
   const mkdir = async () => {
-    const name = window.prompt("새 폴더 이름");
+    const name = window.prompt(tx("새 폴더 이름"));
     if (!name?.trim() || !termId) return;
-    await act("폴더 만드는 중", async () => {
+    await act(tx("폴더 만드는 중"), async () => {
       await api.sftpMkdir(termId, joinPath(path, name.trim()));
       await load(path);
     });
   };
 
   const rename = async (e: RemoteEntry) => {
-    const name = window.prompt("새 이름", e.name);
+    const name = window.prompt(tx("새 이름"), e.name);
     if (!name?.trim() || name === e.name || !termId) return;
-    await act("이름 바꾸는 중", async () => {
+    await act(tx("이름 바꾸는 중"), async () => {
       await api.sftpRename(termId, joinPath(path, e.name), joinPath(path, name.trim()));
       await load(path);
     });
   };
 
   const remove = async (e: RemoteEntry) => {
-    if (!termId || !window.confirm(`'${e.name}'${e.isDir ? " 폴더" : ""}를 서버에서 지울까요? 되돌릴 수 없습니다.`)) return;
-    await act("지우는 중", async () => {
+    if (!termId || !window.confirm(tx("'{0}'{1}를 서버에서 지울까요? 되돌릴 수 없습니다.", e.name, e.isDir ? tx(" 폴더") : ""))) return;
+    await act(tx("지우는 중"), async () => {
       await api.sftpRemove(termId, joinPath(path, e.name), e.isDir);
       await load(path);
     });
@@ -215,7 +216,7 @@ export function SftpPanel({ paneId, onClose }: Props) {
     <aside
       ref={panel}
       className={`sftp${dropping ? " dropping" : ""}`}
-      aria-label="원격 파일"
+      aria-label={tx("원격 파일")}
       onMouseDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
@@ -226,19 +227,19 @@ export function SftpPanel({ paneId, onClose }: Props) {
       }}
     >
       <div className="sftp-head">
-        <span className="sftp-title">파일</span>
+        <span className="sftp-title">{tx("파일")}</span>
         <span style={{ flex: 1 }} />
-        <button className="icon-btn ghost sm" title="터미널의 지금 폴더로" aria-label="터미널의 지금 폴더로" disabled={!termId || busy} onClick={() => void goTerminalDir(true)}>
+        <button className="icon-btn ghost sm" title={tx("터미널의 지금 폴더로")} aria-label={tx("터미널의 지금 폴더로")} disabled={!termId || busy} onClick={() => void goTerminalDir(true)}>
           <IconTarget width={14} height={14} />
         </button>
-        <button className="icon-btn ghost sm" title="새 폴더" aria-label="새 폴더" disabled={!termId || busy} onClick={() => void mkdir()}>
+        <button className="icon-btn ghost sm" title={tx("새 폴더")} aria-label={tx("새 폴더")} disabled={!termId || busy} onClick={() => void mkdir()}>
           <IconFolderPlus width={14} height={14} />
         </button>
         <span className="upload-wrap">
           <button
             className="icon-btn ghost sm"
-            title="올리기 (파일·폴더를 끌어다 놓아도 됩니다)"
-            aria-label="올리기"
+            title={tx("올리기 (파일·폴더를 끌어다 놓아도 됩니다)")}
+            aria-label={tx("올리기")}
             aria-expanded={uploadMenu}
             disabled={!termId || busy || !!transfer}
             onClick={() => setUploadMenu((v) => !v)}
@@ -248,24 +249,24 @@ export function SftpPanel({ paneId, onClose }: Props) {
           {uploadMenu && (
             <span className="upload-menu" role="menu" onMouseLeave={() => setUploadMenu(false)}>
               <button role="menuitem" onClick={async () => { setUploadMenu(false); void upload(await pickUploadFiles()); }}>
-                파일 올리기…
+                {tx("파일 올리기…")}
               </button>
-              <button role="menuitem" onClick={async () => { setUploadMenu(false); const f = await pickFolder("올릴 폴더"); if (f) void upload([f]); }}>
-                폴더 올리기…
+              <button role="menuitem" onClick={async () => { setUploadMenu(false); const f = await pickFolder(tx("올릴 폴더")); if (f) void upload([f]); }}>
+                {tx("폴더 올리기…")}
               </button>
             </span>
           )}
         </span>
-        <button className="icon-btn ghost sm" title="새로 고침" aria-label="새로 고침" disabled={!termId || busy} onClick={() => void load(path)}>
+        <button className="icon-btn ghost sm" title={tx("새로 고침")} aria-label={tx("새로 고침")} disabled={!termId || busy} onClick={() => void load(path)}>
           <IconRefresh width={14} height={14} />
         </button>
-        <button className="icon-btn ghost sm" title="파일 창 닫기" aria-label="파일 창 닫기" onClick={onClose}>
+        <button className="icon-btn ghost sm" title={tx("파일 창 닫기")} aria-label={tx("파일 창 닫기")} onClick={onClose}>
           <IconClose width={13} height={13} />
         </button>
       </div>
 
       {!termId ? (
-        <p className="sftp-empty">연결되면 서버의 파일을 볼 수 있습니다.</p>
+        <p className="sftp-empty">{tx("연결되면 서버의 파일을 볼 수 있습니다.")}</p>
       ) : (
         <>
           <form
@@ -275,14 +276,14 @@ export function SftpPanel({ paneId, onClose }: Props) {
               void load(typed);
             }}
           >
-            <button type="button" className="icon-btn ghost sm" title="위 폴더" aria-label="위 폴더" disabled={busy || path === "/"} onClick={() => void load(parentOf(path))}>
+            <button type="button" className="icon-btn ghost sm" title={tx("위 폴더")} aria-label={tx("위 폴더")} disabled={busy || path === "/"} onClick={() => void load(parentOf(path))}>
               <IconUp width={14} height={14} />
             </button>
-            <input className="input mono" aria-label="원격 경로" value={typed} onChange={(e) => setTyped(e.target.value)} spellCheck={false} />
+            <input className="input mono" aria-label={tx("원격 경로")} value={typed} onChange={(e) => setTyped(e.target.value)} spellCheck={false} />
           </form>
 
-          <ul className="sftp-list" role="listbox" aria-label={`${path} 안의 파일`} aria-busy={busy}>
-            {entries.length === 0 && !busy && <li className="sftp-empty">빈 폴더입니다.</li>}
+          <ul className="sftp-list" role="listbox" aria-label={tx("{0} 안의 파일", path)} aria-busy={busy}>
+            {entries.length === 0 && !busy && <li className="sftp-empty">{tx("빈 폴더입니다.")}</li>}
             {entries.map((e) => (
               <li
                 key={e.name}
@@ -293,21 +294,21 @@ export function SftpPanel({ paneId, onClose }: Props) {
                 onClick={() => setSelected(e.name)}
                 onFocus={() => setSelected(e.name)}
                 onDoubleClick={() => open(e)}
-                title={e.isDir ? "더블클릭: 열기" : "더블클릭: 내려받기"}
+                title={e.isDir ? tx("더블클릭: 열기") : tx("더블클릭: 내려받기")}
               >
                 {e.isDir ? <IconFolder width={14} height={14} className="ic dir" /> : <IconFile width={14} height={14} className="ic" />}
                 <span className="nm">{e.name}{e.isLink ? " →" : ""}</span>
                 <span className="meta">{e.isDir ? when(e.mtime) : humanSize(e.size)}</span>
                 <span className="row-actions">
                   {!e.isLink && (
-                    <button className="icon-btn ghost xs" title={e.isDir ? "폴더째 내려받기" : "내려받기"} aria-label={`${e.name} 내려받기`} disabled={!!transfer} onClick={(ev) => { ev.stopPropagation(); void download(e); }}>
+                    <button className="icon-btn ghost xs" title={e.isDir ? tx("폴더째 내려받기") : tx("내려받기")} aria-label={tx("{0} 내려받기", e.name)} disabled={!!transfer} onClick={(ev) => { ev.stopPropagation(); void download(e); }}>
                       <IconDownload width={12} height={12} />
                     </button>
                   )}
-                  <button className="icon-btn ghost xs" title="이름 바꾸기" aria-label={`${e.name} 이름 바꾸기`} onClick={(ev) => { ev.stopPropagation(); void rename(e); }}>
+                  <button className="icon-btn ghost xs" title={tx("이름 바꾸기")} aria-label={tx("{0} 이름 바꾸기", e.name)} onClick={(ev) => { ev.stopPropagation(); void rename(e); }}>
                     <IconEdit width={12} height={12} />
                   </button>
-                  <button className="icon-btn ghost xs danger" title="지우기" aria-label={`${e.name} 지우기`} onClick={(ev) => { ev.stopPropagation(); void remove(e); }}>
+                  <button className="icon-btn ghost xs danger" title={tx("지우기")} aria-label={tx("{0} 지우기", e.name)} onClick={(ev) => { ev.stopPropagation(); void remove(e); }}>
                     <IconTrash width={12} height={12} />
                   </button>
                 </span>
@@ -322,7 +323,7 @@ export function SftpPanel({ paneId, onClose }: Props) {
           <div className="row">
             <span className="label">{transfer.label}</span>
             <button className="btn subtle sm" onClick={() => void api.sftpCancel(transfer.id)}>
-              취소
+              {tx("취소")}
             </button>
           </div>
           <div className="progress" aria-hidden>
@@ -333,7 +334,7 @@ export function SftpPanel({ paneId, onClose }: Props) {
           </div>
           {transfer.p && (
             <div className="detail">
-              {humanSize(transfer.p.done)} / {humanSize(transfer.p.total)} · 파일 {transfer.p.filesDone}/{transfer.p.filesTotal}
+              {tx("{0} / {1} · 파일 {2}/{3}", humanSize(transfer.p.done), humanSize(transfer.p.total), transfer.p.filesDone, transfer.p.filesTotal)}
               {transfer.p.file && <span className="file"> · {transfer.p.file}</span>}
             </div>
           )}
@@ -341,7 +342,7 @@ export function SftpPanel({ paneId, onClose }: Props) {
       )}
       {(message || dropping) && (
         <div className={`sftp-msg${message?.error ? " error" : ""}`} role="status">
-          {dropping ? `여기에 놓으면 ${path || "지금 폴더"}로 올립니다` : message?.text}
+          {dropping ? tx("여기에 놓으면 {0}로 올립니다", path || tx("지금 폴더")) : message?.text}
         </div>
       )}
     </aside>

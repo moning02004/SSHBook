@@ -23,7 +23,9 @@ const RESET: &str = "\x1b[0m";
 
 fn note(sink: &Sink, ok: bool, text: String) {
     let color = if ok { DIM } else { YELLOW };
-    sink(Out::Data(format!("{color}[포워딩] {text}{RESET}\r\n").into_bytes()));
+    let label = crate::i18n::tr("포워딩");
+    let text = crate::i18n::tr(&text);
+    sink(Out::Data(format!("{color}[{label}] {text}{RESET}\r\n").into_bytes()));
 }
 
 pub fn describe(f: &Forward) -> String {

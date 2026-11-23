@@ -8,6 +8,7 @@ import { SearchBar } from "./SearchBar";
 import { SftpPanel } from "./SftpPanel";
 import { StatusDot } from "./StatusDot";
 import { TerminalView } from "./TerminalView";
+import { tx } from "../lib/i18n";
 
 export interface PaneInfo {
   sessionId: string | null;
@@ -22,7 +23,7 @@ export interface PaneInfo {
 }
 
 /** 탭에 보일 이름 */
-export const tabTitle = (p: PaneInfo | undefined) => p?.customTitle || p?.title || "터미널";
+export const tabTitle = (p: PaneInfo | undefined) => p?.customTitle || p?.title || tx("터미널");
 
 interface Props {
   desk: Desk;
@@ -119,9 +120,9 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
     .join(" ");
 
   return (
-    <section className={cls} data-group-id={g.id} aria-label={`${tabTitle(info)} 칸`} onMouseDown={() => props.onActivateGroup(g.id)}>
+    <section className={cls} data-group-id={g.id} aria-label={tx("{0} 칸", tabTitle(info))} onMouseDown={() => props.onActivateGroup(g.id)}>
       <div className="group-bar" data-group-bar={g.id}>
-        <div className="group-tabs" role="tablist" aria-label="이 칸의 탭">
+        <div className="group-tabs" role="tablist" aria-label={tx("이 칸의 탭")}>
           {g.tabs.map((t, i) => {
             const p = panes[t];
             const st = paneStatus(t);
@@ -168,7 +169,7 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
                     <StatusDot status={st} />
                     <input
                       className="gtab-rename"
-                      aria-label="탭 이름"
+                      aria-label={tx("탭 이름")}
                       autoFocus
                       defaultValue={tabTitle(p)}
                       placeholder={p?.title}
@@ -187,38 +188,38 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
                     <span className="t">{tabTitle(p)}</span>
                   </button>
                 )}
-                <button className="close" aria-label={`${tabTitle(p)} 닫기`} title="탭 닫기" onClick={() => props.onCloseTab(t)}>
+                <button className="close" aria-label={tx("{0} 닫기", tabTitle(p))} title={tx("탭 닫기")} onClick={() => props.onCloseTab(t)}>
                   <IconClose width={11} height={11} />
                 </button>
               </div>
             );
           })}
-          <button className="icon-btn ghost gnew" aria-label="이 칸에 새 탭 (로컬 셸)" title="이 칸에 새 탭 (로컬 셸)" onClick={() => props.onNewTab(g.id)}>
+          <button className="icon-btn ghost gnew" aria-label={tx("이 칸에 새 탭 (로컬 셸)")} title={tx("이 칸에 새 탭 (로컬 셸)")} onClick={() => props.onNewTab(g.id)}>
             <IconPlus width={13} height={13} />
           </button>
         </div>
         <div className="group-tools">
           {ms !== null && (
-            <span className={`latency${latencyClass(ms)}`} title="서버 응답 시간">
+            <span className={`latency${latencyClass(ms)}`} title={tx("서버 응답 시간")}>
               {ms}ms
             </span>
           )}
           {broadcasting && (
-            <button className="zoom-pill broadcast-pill" title="보이는 모든 칸에 같은 입력을 보내는 중 · 눌러서 끄기" onClick={props.onToggleBroadcast}>
-              <IconBroadcast width={12} height={12} /> 동시 입력
+            <button className="zoom-pill broadcast-pill" title={tx("보이는 모든 칸에 같은 입력을 보내는 중 · 눌러서 끄기")} onClick={props.onToggleBroadcast}>
+              <IconBroadcast width={12} height={12} />{" "}{tx("동시 입력")}
             </button>
           )}
           {zoomed && (
             <button className="zoom-pill" onClick={props.onUnzoom}>
-              확대 중 · 원래대로
+              {tx("확대 중 · 원래대로")}
             </button>
           )}
           {info?.ssh && (
             <button
               className="icon-btn ghost pane-menu"
               aria-pressed={props.sftpPanes.has(id)}
-              aria-label="파일 창"
-              title="파일 창 (SFTP)"
+              aria-label={tx("파일 창")}
+              title={tx("파일 창 (SFTP)")}
               onClick={() => props.onToggleSftp(id)}
             >
               <IconFolder width={14} height={14} />
@@ -226,8 +227,8 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
           )}
           <button
             className="icon-btn ghost pane-menu"
-            aria-label="칸 메뉴"
-            title="메뉴 (오른쪽 클릭과 같음)"
+            aria-label={tx("칸 메뉴")}
+            title={tx("메뉴 (오른쪽 클릭과 같음)")}
             onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               props.onPaneMenu(id, r.right - 264, r.bottom + 4);
@@ -280,7 +281,7 @@ function Divider({ dir, onResize }: { dir: "row" | "column"; onResize: (ratio: n
       className={`divider-${dir}`}
       role="separator"
       aria-orientation={dir === "row" ? "vertical" : "horizontal"}
-      title="끌어서 크기 조절 · 더블클릭하면 반반"
+      title={tx("끌어서 크기 조절 · 더블클릭하면 반반")}
       onMouseDown={start}
       onDoubleClick={(e) => {
         e.stopPropagation();

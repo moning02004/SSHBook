@@ -7,6 +7,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useSyncExternalStore } from "react";
 import { api, errorText, inTauri } from "./api";
+import { tx } from "./i18n";
 
 export type UpdateState =
   | { phase: "idle" }
@@ -37,7 +38,7 @@ export function useUpdateState(): UpdateState {
   return useSyncExternalStore(subscribe, () => state);
 }
 
-export const appVersion = (): Promise<string> => (inTauri ? getVersion() : Promise.resolve("미리보기"));
+export const appVersion = (): Promise<string> => (inTauri ? getVersion() : Promise.resolve(tx("미리보기")));
 
 /**
  * 새 버전을 확인한다. manual이면 '최신 버전입니다'나 오류도 보여 주고,
@@ -45,7 +46,7 @@ export const appVersion = (): Promise<string> => (inTauri ? getVersion() : Promi
  */
 export async function checkForUpdate(manual: boolean): Promise<void> {
   if (!inTauri) {
-    if (manual) set({ phase: "error", message: "브라우저 미리보기에서는 업데이트를 확인할 수 없습니다." });
+    if (manual) set({ phase: "error", message: tx("브라우저 미리보기에서는 업데이트를 확인할 수 없습니다.") });
     return;
   }
   if (state.phase === "checking" || state.phase === "downloading" || state.phase === "installing") return;
@@ -68,8 +69,8 @@ export async function checkForUpdate(manual: boolean): Promise<void> {
 /** 새 버전의 이 OS용 파일이 아직 안 올라왔을 때(릴리스 빌드 중) 알아듣기 쉽게 바꾼다. */
 function checkErrorText(e: unknown): string {
   const text = errorText(e);
-  if (/platform/i.test(text)) return "새 버전을 준비하는 중입니다. 잠시 뒤 다시 확인해 주세요.";
-  return `업데이트를 확인하지 못했습니다: ${text}`;
+  if (/platform/i.test(text)) return tx("새 버전을 준비하는 중입니다. 잠시 뒤 다시 확인해 주세요.");
+  return tx("업데이트를 확인하지 못했습니다: {0}", text);
 }
 
 export function dismissUpdate() {
@@ -96,7 +97,7 @@ export async function installUpdate(): Promise<void> {
     await relaunch();
   } catch (e) {
     void api.appLog("warn", `업데이트 설치 실패 v${version}: ${errorText(e)}`).catch(() => {});
-    set({ phase: "error", message: `업데이트하지 못했습니다: ${errorText(e)}` });
+    set({ phase: "error", message: tx("업데이트하지 못했습니다: {0}", errorText(e)) });
   }
 }
 

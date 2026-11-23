@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Session, Snippet } from "./sessions";
+import { translateBackend, tx, type Language } from "./i18n";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -55,7 +56,7 @@ export interface SftpProgress {
 }
 
 /** 취소했을 때의 오류 문구(백엔드 sftp::CANCELLED와 같다) */
-export const TRANSFER_CANCELLED = "전송을 취소했습니다.";
+export const TRANSFER_CANCELLED = tx("전송을 취소했습니다.");
 
 export interface TermLatency {
   id: string;
@@ -126,7 +127,10 @@ export function parseOpenError(e: unknown): { hostKey: HostKeyPrompt } | { ask: 
   const s = errorText(e);
   try {
     if (s.startsWith("hostkey:")) return { hostKey: JSON.parse(s.slice(8)) };
-    if (s.startsWith("ask:")) return { ask: JSON.parse(s.slice(4)) };
+    if (s.startsWith("ask:")) {
+      const ask: AskPrompt = JSON.parse(s.slice(4));
+      return { ask: { ...ask, message: translateBackend(ask.message) } };
+    }
   } catch {
     // 형식이 깨졌으면 그냥 글자로 보여 준다.
   }
@@ -182,6 +186,8 @@ export interface Backend {
   termAuthAnswer(id: string, answers: string[] | null): Promise<void>;
   onAuthPrompt(cb: (e: AuthPrompt) => void): Promise<() => void>;
   sshConfigHosts(): Promise<ConfigHost[]>;
+  /** 터미널에 직접 쓰는 문구와 메뉴의 언어를 맞춘다 */
+  appSetLanguage(lang: Language): Promise<void>;
   /** 사용자가 확인한 호스트 키를 보관함에 저장한다 */
   hostTrust(hostId: string, fingerprint: string): Promise<void>;
   knownHostsList(): Promise<KnownHost[]>;
@@ -231,6 +237,7 @@ const tauriBackend: Backend = {
   termAuthAnswer: (id, answers) => invoke("term_auth_answer", { id, answers }),
   onAuthPrompt: (cb) => listen<AuthPrompt>("term-auth-prompt", (e) => cb(e.payload)),
   sshConfigHosts: () => invoke("ssh_config_hosts"),
+  appSetLanguage: (lang) => invoke("app_set_language", { lang }),
   hostTrust: (hostId, fingerprint) => invoke("host_trust", { hostId, fingerprint }),
   knownHostsList: () => invoke("known_hosts_list"),
   knownHostRemove: (hostId) => invoke("known_host_remove", { hostId }),
@@ -495,6 +502,7 @@ function createMockBackend(): Backend {
     async onAuthPrompt() {
       return () => {};
     },
+    async appSetLanguage() {},
     async sshConfigHosts() {
       return [
         { alias: "staging", host: "10.0.2.15", port: 22, user: "deploy", identityFile: "~/.ssh/id_ed25519", proxyJump: "bastion" },
@@ -521,7 +529,7 @@ function createMockBackend(): Backend {
 export const api: Backend = import.meta.env.DEV && !inTauri ? createMockBackend() : tauriBackend;
 
 export function errorText(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return translateBackend(e);
+  if (e instanceof Error) return translateBackend(e.message);
   return String(e);
 }

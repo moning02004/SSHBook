@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
+import { tx } from "../lib/i18n";
 
 export interface DropdownOption<T> {
   value: T;
@@ -126,7 +127,7 @@ export function Dropdown<T extends string | number>({ value, options, onChange, 
         onKeyDown={onKey}
         onBlur={hide}
       >
-        <span className="dropdown-value">{options[selected]?.label ?? "선택 안 됨"}</span>
+        <span className="dropdown-value">{options[selected]?.label ?? tx("선택 안 됨")}</span>
       </button>
       {menu &&
         createPortal(

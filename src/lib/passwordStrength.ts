@@ -1,3 +1,4 @@
+import { tx } from "./i18n";
 // 마스터 비밀번호 강도. 외부 사전 없이, 길이·문자 종류·흔한 패턴으로 대략 잰다.
 // 보관함 파일은 Argon2id로 잠기지만, 파일이 새면 비밀번호를 하나씩 대입해 볼 수 있으므로 길수록 좋다.
 
@@ -9,7 +10,7 @@ export interface Strength {
   hint: string;
 }
 
-const LABELS = ["매우 약함", "약함", "보통", "강함", "매우 강함"] as const;
+const LABELS = [tx("매우 약함"), tx("약함"), tx("보통"), tx("강함"), tx("매우 강함")] as const;
 
 /** 자주 쓰이는 비밀번호 조각. 들어 있으면 그만큼 빼고 센다. */
 const COMMON = [
@@ -43,9 +44,9 @@ export function passwordStrength(pw: string): Strength {
     score >= 3
       ? ""
       : effective < [...pw].length
-        ? "흔한 단어나 연속된 글자(1234, abcd)를 빼세요."
+        ? tx("흔한 단어나 연속된 글자(1234, abcd)를 빼세요.")
         : classes < 3
-          ? "더 길게 하거나 대문자·숫자·기호를 섞으세요."
-          : "단어 서너 개를 이어 붙이면 길고 외우기 쉽습니다.";
+          ? tx("더 길게 하거나 대문자·숫자·기호를 섞으세요.")
+          : tx("단어 서너 개를 이어 붙이면 길고 외우기 쉽습니다.");
   return { score, label: LABELS[score], hint };
 }

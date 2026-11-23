@@ -1,3 +1,4 @@
+import { tx } from "./i18n";
 // 터미널 붙여넣기 안전장치.
 // 웹페이지에서 복사한 글에는 보이지 않는 줄바꿈이나 제어 문자가 숨어 있을 수 있고,
 // 셸은 줄바꿈을 만나면 그 줄을 바로 실행한다.
@@ -17,7 +18,7 @@ export function pasteWarning(text: string, bracketed: boolean, targets: number):
   if (bracketed && targets <= 1) return null;
   const lines = text.replace(/\n$/, "").split("\n");
   const preview = lines.slice(0, 5).map((l) => (l.length > 70 ? `${l.slice(0, 70)}…` : l)).join("\n");
-  const more = lines.length > 5 ? `\n… 외 ${lines.length - 5}줄` : "";
-  const where = targets > 1 ? `동시 입력 중인 창 ${targets}개에` : "터미널에";
-  return `${where} ${lines.length}줄을 붙여 넣습니다. 줄바꿈이 있으면 바로 실행될 수 있습니다.\n\n${preview}${more}\n\n붙여 넣을까요?`;
+  const more = lines.length > 5 ? tx("\n… 외 {0}줄", lines.length - 5) : "";
+  const where = targets > 1 ? tx("동시 입력 중인 창 {0}개에", targets) : tx("터미널에");
+  return tx("{0} {1}줄을 붙여 넣습니다. 줄바꿈이 있으면 바로 실행될 수 있습니다.\n\n{2}{3}\n\n붙여 넣을까요?", where, lines.length, preview, more);
 }

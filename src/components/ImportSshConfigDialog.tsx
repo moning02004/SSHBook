@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errorText, type ConfigHost } from "../lib/api";
 import type { Session } from "../lib/sessions";
 import { IconClose } from "./Icons";
+import { tx } from "../lib/i18n";
+import { useEscape } from "../lib/useEscape";
 
 interface Props {
   sessions: Session[];
@@ -15,6 +17,7 @@ const sameServer = (s: Session, h: ConfigHost) =>
 
 /** ~/.ssh/config의 호스트를 골라 세션으로 만든다. 설정 파일은 고치지 않고 비밀번호도 읽지 않는다. */
 export function ImportSshConfigDialog({ sessions, onImported, onClose }: Props) {
+  useEscape(onClose);
   const [hosts, setHosts] = useState<ConfigHost[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -77,11 +80,11 @@ export function ImportSshConfigDialog({ sessions, onImported, onClose }: Props) 
         if (via && self && via.id !== self.id) await api.sessionSave({ ...self, jumpId: via.id });
         else jumpsSkipped += 1;
       }
-      const note = jumpsSkipped ? ` 점프 호스트 ${jumpsSkipped}개는 직접 지정해 주세요.` : "";
-      await onImported(`세션 ${chosen.length}개를 가져왔습니다.${note}`);
+      const note = jumpsSkipped ? tx(" 점프 호스트 {0}개는 직접 지정해 주세요.", jumpsSkipped) : "";
+      await onImported(tx("세션 {0}개를 가져왔습니다.{1}", chosen.length, note));
       onClose();
     } catch (e) {
-      await onImported(`세션 ${made.size}개까지 가져왔습니다.`);
+      await onImported(tx("세션 {0}개까지 가져왔습니다.", made.size));
       setError(errorText(e));
       setBusy(false);
     }
@@ -91,17 +94,17 @@ export function ImportSshConfigDialog({ sessions, onImported, onClose }: Props) 
 
   return (
     <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog wide" role="dialog" aria-labelledby="ic-title" onKeyDown={(e) => e.key === "Escape" && onClose()}>
+      <div className="dialog wide" role="dialog" aria-labelledby="ic-title">
         <div className="dialog-head">
-          <h2 id="ic-title">~/.ssh/config 가져오기</h2>
-          <button className="icon-btn ghost" aria-label="닫기" onClick={onClose}>
+          <h2 id="ic-title">{tx("~/.ssh/config 가져오기")}</h2>
+          <button className="icon-btn ghost" aria-label={tx("닫기")} onClick={onClose}>
             <IconClose />
           </button>
         </div>
         <div className="dialog-body">
-          <p className="hint">호스트 정보만 세션으로 옮깁니다. 키 파일은 그 경로를 그대로 쓰고, 비밀번호는 연결할 때 묻습니다.</p>
-          {hosts === null && <p className="hint">읽는 중…</p>}
-          {hosts?.length === 0 && !error && <p className="empty">가져올 호스트가 없습니다.</p>}
+          <p className="hint">{tx("호스트 정보만 세션으로 옮깁니다. 키 파일은 그 경로를 그대로 쓰고, 비밀번호는 연결할 때 묻습니다.")}</p>
+          {hosts === null && <p className="hint">{tx("읽는 중…")}</p>}
+          {hosts?.length === 0 && !error && <p className="empty">{tx("가져올 호스트가 없습니다.")}</p>}
           {!!hosts?.length && (
             <ul className="import-list">
               {hosts.map((h) => {
@@ -116,8 +119,8 @@ export function ImportSshConfigDialog({ sessions, onImported, onClose }: Props) 
                           {h.user ? `${h.user}@` : ""}
                           {h.host}
                           {h.port !== 22 ? `:${h.port}` : ""}
-                          {h.proxyJump ? ` · 점프 ${h.proxyJump}` : ""}
-                          {!h.user ? " · 사용자 없음" : !ok ? " · 이미 있음" : ""}
+                          {h.proxyJump ? tx(" · 점프 {0}", h.proxyJump) : ""}
+                          {!h.user ? tx(" · 사용자 없음") : !ok ? tx(" · 이미 있음") : ""}
                         </span>
                       </span>
                     </label>
@@ -131,10 +134,10 @@ export function ImportSshConfigDialog({ sessions, onImported, onClose }: Props) 
         <div className="dialog-foot">
           <span className="spacer" />
           <button className="btn" onClick={onClose}>
-            취소
+            {tx("취소")}
           </button>
           <button className="btn primary" disabled={busy || count === 0} onClick={() => void run()}>
-            {count}개 가져오기
+            {tx("{0}개 가져오기", count)}
           </button>
         </div>
       </div>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import * as terms from "../lib/terminals";
 import { IconClose } from "./Icons";
+import { tx } from "../lib/i18n";
 
 interface Props {
   paneId: string;
@@ -54,32 +55,32 @@ export function SearchBar({ paneId, onClose }: Props) {
   };
 
   const label =
-    !text || !result ? "" : result.count === 0 ? "없음" : result.index < 0 ? `${result.count}+개` : `${result.index + 1}/${result.count}`;
+    !text || !result ? "" : result.count === 0 ? tx("없음") : result.index < 0 ? tx("{0}+개", result.count) : `${result.index + 1}/${result.count}`;
 
   return (
     <div className="search-bar" role="search" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
       <input
         ref={input}
-        aria-label="터미널에서 찾기"
-        placeholder="찾기"
+        aria-label={tx("터미널에서 찾기")}
+        placeholder={tx("찾기")}
         value={text}
         onChange={(e) => setText(e.target.value)}
         className={text && result?.count === 0 ? "no-match" : ""}
       />
       <span className="count" aria-live="polite">{label}</span>
-      <button className={`opt${caseSensitive ? " on" : ""}`} aria-pressed={caseSensitive} title="대소문자 구분" onClick={() => setCase((v) => !v)}>
+      <button className={`opt${caseSensitive ? " on" : ""}`} aria-pressed={caseSensitive} title={tx("대소문자 구분")} onClick={() => setCase((v) => !v)}>
         Aa
       </button>
-      <button className={`opt${regex ? " on" : ""}`} aria-pressed={regex} title="정규식" onClick={() => setRegex((v) => !v)}>
+      <button className={`opt${regex ? " on" : ""}`} aria-pressed={regex} title={tx("정규식")} onClick={() => setRegex((v) => !v)}>
         .*
       </button>
-      <button className="opt" title="이전 (Shift+Enter)" aria-label="이전" disabled={!text} onClick={() => terms.findPrevious(paneId, q)}>
+      <button className="opt" title={tx("이전 (Shift+Enter)")} aria-label={tx("이전")} disabled={!text} onClick={() => terms.findPrevious(paneId, q)}>
         ↑
       </button>
-      <button className="opt" title="다음 (Enter)" aria-label="다음" disabled={!text} onClick={() => terms.findNext(paneId, q)}>
+      <button className="opt" title={tx("다음 (Enter)")} aria-label={tx("다음")} disabled={!text} onClick={() => terms.findNext(paneId, q)}>
         ↓
       </button>
-      <button className="opt" title="닫기 (Esc)" aria-label="검색 닫기" onClick={close}>
+      <button className="opt" title={tx("닫기 (Esc)")} aria-label={tx("검색 닫기")} onClick={close}>
         <IconClose width={12} height={12} />
       </button>
     </div>

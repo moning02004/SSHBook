@@ -1,4 +1,5 @@
 import { passwordStrength } from "../lib/passwordStrength";
+import { tx } from "../lib/i18n";
 
 /** 비밀번호 강도 막대 + 한 줄 안내 */
 export function StrengthMeter({ password }: { password: string }) {
@@ -11,7 +12,7 @@ export function StrengthMeter({ password }: { password: string }) {
           <span key={i} className={i < Math.max(1, s.score) ? "on" : ""} />
         ))}
       </div>
-      <span className="strength-label">강도: {s.label}</span>
+      <span className="strength-label">{tx("강도: {0}", s.label)}</span>
       {s.hint && <span className="hint">{s.hint}</span>}
     </div>
   );

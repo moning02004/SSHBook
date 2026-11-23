@@ -139,3 +139,86 @@ test("~/.ssh/config에서 없는 호스트만 가져온다", async ({ page }) =>
   await expect(page.locator(".session .name", { hasText: "staging" })).toBeVisible();
   await expect(page.locator(".session .name", { hasText: "bastion" })).toBeVisible();
 });
+
+test("영어 화면에는 한글이 남지 않는다", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("sshbook.language", "en"));
+  await page.goto("/");
+  const fields = page.locator('input[type="password"]');
+  await fields.nth(0).fill(MASTER);
+  await fields.nth(1).fill(MASTER);
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
+
+  // 언어 이름과 글꼴 미리보기의 한글 예시만 그대로 둔다.
+  const korean = () =>
+    page.evaluate(() => {
+      const text = document.body.innerText.replaceAll("한국어", "").replace(/배포 로그|가나/g, "");
+      const attrs = [...document.querySelectorAll("[placeholder],[title],[aria-label]")].flatMap((el) =>
+        ["placeholder", "title", "aria-label"].map((a) => el.getAttribute(a) ?? ""),
+      );
+      return [...text.split("\n"), ...attrs].filter((s) => /[가-힣]/.test(s));
+    });
+  expect(await korean()).toEqual([]);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  for (const tab of await page.getByRole("tab").all()) {
+    await tab.click();
+    expect(await korean(), await tab.innerText()).toEqual([]);
+  }
+  await page.locator(".settings-dialog").getByRole("button", { name: "Close", exact: true }).last().click();
+
+  await page.getByRole("button", { name: "New session" }).click();
+  for (const tab of await page.locator(".session-editor").getByRole("tab").all()) {
+    await tab.click();
+    expect(await korean(), await tab.innerText()).toEqual([]);
+  }
+  await page.locator(".session-editor").getByRole("button", { name: "Cancel" }).click();
+
+  await page.getByTitle("prod-web-01").first().click();
+  await expect(terminal(page)).toContainText("First connection");
+  await expect(terminal(page)).toContainText("Esc to cancel");
+  await page.keyboard.press("Escape");
+  await expect(terminal(page)).toContainText("Connection cancelled.");
+  expect(await korean()).toEqual([]);
+});
+
+test("ESC는 초점이 터미널에 있어도 맨 위 모달만 닫고 셸로 보내지 않는다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const sent = await page.evaluateHandle(async () => {
+    const { api } = await import("/src/lib/api.ts" as string);
+    const out: string[] = [];
+    api.termWrite = async (_id: string, data: string) => void out.push(data);
+    return out;
+  });
+  const settings = page.locator(".settings-dialog");
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "알려진 서버 관리" }).click();
+  const known = page.getByRole("dialog", { name: "알려진 서버" });
+  await expect(known).toBeVisible();
+
+  await page.locator(".xterm-helper-textarea").last().focus();
+  await page.keyboard.press("Escape");
+  await expect(known).toHaveCount(0);
+  await expect(settings).toBeVisible();
+
+  // 열린 드롭다운은 목록만 닫는다.
+  await page.locator(".settings-panel .dropdown").first().click();
+  await expect(page.locator(".dropdown-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".dropdown-menu")).toHaveCount(0);
+  await expect(settings).toBeVisible();
+
+  await page.locator(".xterm-helper-textarea").last().focus();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  expect(await sent.evaluate((o) => o.join(""))).not.toContain("\x1b");
+
+  for (const open of ["새 세션"]) {
+    await page.getByRole("button", { name: open }).click();
+    await expect(page.locator(".session-editor")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".session-editor")).toHaveCount(0);
+  }
+});

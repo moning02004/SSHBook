@@ -1,3 +1,4 @@
+import { tx } from "./i18n";
 // 이 PC에만 기억하는 앱 설정. 보관함과 상관없고, 바꾸면 열린 터미널에 바로 적용된다.
 
 export type CursorStyle = "block" | "bar" | "underline";
@@ -138,7 +139,7 @@ export function isFontInstalled(name: string): boolean {
   try {
     const ctx = document.createElement("canvas").getContext("2d");
     if (!ctx) return true;
-    const sample = "mmmmmmmmmmlli1WW@#가나";
+    const sample = tx("mmmmmmmmmmlli1WW@#가나");
     return ["monospace", "serif", "sans-serif"].some((base) => {
       ctx.font = `20px ${base}`;
       const w0 = ctx.measureText(sample).width;

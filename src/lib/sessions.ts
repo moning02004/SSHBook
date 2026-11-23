@@ -1,3 +1,4 @@
+import { tx } from "./i18n";
 // 세션 모델과 사이드바 묶음 규칙.
 // Rust 쪽 vault.rs의 Session 구조체와 필드 이름을 맞춘다(camelCase).
 
@@ -7,12 +8,12 @@ export type AuthMethod = "password" | "key" | "agent";
 export const SESSION_COLORS = ["red", "orange", "yellow", "green", "blue", "purple"] as const;
 export type SessionColor = (typeof SESSION_COLORS)[number];
 export const COLOR_LABEL: Record<SessionColor, string> = {
-  red: "빨강 (운영)",
-  orange: "주황 (스테이징)",
-  yellow: "노랑",
-  green: "초록 (개발)",
-  blue: "파랑",
-  purple: "보라",
+  red: tx("빨강 (운영)"),
+  orange: tx("주황 (스테이징)"),
+  yellow: tx("노랑"),
+  green: tx("초록 (개발)"),
+  blue: tx("파랑"),
+  purple: tx("보라"),
 };
 
 export type ForwardKind = "local" | "remote" | "dynamic";
@@ -60,7 +61,7 @@ export interface Session {
   hasPassphrase?: boolean;
 }
 
-export const UNGROUPED_LABEL = "그룹 없음";
+export const UNGROUPED_LABEL = tx("그룹 없음");
 
 export interface SessionSection {
   /** null이면 제목 없이 목록만 보여준다 */
@@ -97,16 +98,16 @@ export function groupSessions(list: Session[]): SessionSection[] {
 
 export function describeForward(f: Forward): string {
   const dest = `${f.host || "?"}:${f.port || "?"}`;
-  if (f.kind === "local") return `내 PC :${f.bindPort} → ${dest}`;
-  if (f.kind === "remote") return `서버 :${f.bindPort} → 내 PC ${dest}`;
+  if (f.kind === "local") return tx("내 PC :{0} → {1}", f.bindPort, dest);
+  if (f.kind === "remote") return tx("서버 :{0} → 내 PC {1}", f.bindPort, dest);
   return `SOCKS5 :${f.bindPort}`;
 }
 
 /** 저장하기 전에 확인한다. 문제가 있으면 사용자에게 보여 줄 문장을 돌려준다. */
 export function forwardProblem(f: Forward): string | null {
   const okPort = (p: number | undefined) => !!p && p >= 1 && p <= 65535;
-  if (!okPort(f.bindPort)) return "포워딩 포트는 1~65535 사이여야 합니다.";
-  if (f.kind !== "dynamic" && (!f.host?.trim() || !okPort(f.port))) return "포워딩 목적지의 호스트와 포트를 입력하세요.";
+  if (!okPort(f.bindPort)) return tx("포워딩 포트는 1~65535 사이여야 합니다.");
+  if (f.kind !== "dynamic" && (!f.host?.trim() || !okPort(f.port))) return tx("포워딩 목적지의 호스트와 포트를 입력하세요.");
   return null;
 }
 
@@ -119,7 +120,7 @@ export function filterSessions(list: Session[], query: string): Session[] {
 }
 
 export function describeSession(s: Session): string {
-  if (s.kind === "local") return `${s.shell || "기본 셸"} · 로컬`;
+  if (s.kind === "local") return tx("{0} · 로컬", s.shell || tx("기본 셸"));
   const port = s.port && s.port !== 22 ? `:${s.port}` : "";
   return `${s.user ? s.user + "@" : ""}${s.host ?? ""}${port}`;
 }
