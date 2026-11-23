@@ -16,9 +16,11 @@ import {
 import type { ThemeName } from "../lib/theme";
 import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
+import { Dropdown } from "./Dropdown";
 import { IconClose, IconExport, IconUnlock } from "./Icons";
 import { KnownHostsDialog } from "./KnownHostsDialog";
 import { PasswordModeDialog } from "./PasswordModeDialog";
+import { SideTabs } from "./SideTabs";
 
 export function useSettings() {
   return useSyncExternalStore(subscribeSettings, getSettings);
@@ -73,6 +75,20 @@ const SHORTCUTS: [string, string][] = [
 
 const CUSTOM = "__custom__";
 
+type SettingsTab = "appearance" | "terminal" | "security" | "shortcuts" | "logs" | "update";
+
+const TABS: [SettingsTab, string][] = [
+  ["appearance", "화면"],
+  ["terminal", "터미널"],
+  ["security", "보안"],
+  ["shortcuts", "단축키"],
+  ["logs", "기록"],
+  ["update", "업데이트"],
+];
+
+/** 설정을 다시 열면 마지막으로 보던 항목을 보여 준다. */
+let lastTab: SettingsTab = "appearance";
+
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
 export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, onClose }: Props) {
   const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | null>(null);
@@ -80,6 +96,11 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
   const installed = useMemo(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])), []);
   const isPreset = s.fontFamily === "" || FONT_PRESETS.includes(s.fontFamily);
   const [custom, setCustom] = useState(!isPreset);
+  const [tab, setTab] = useState<SettingsTab>(lastTab);
+  const pick = (next: SettingsTab) => {
+    lastTab = next;
+    setTab(next);
+  };
 
   const seg = <T extends string | number>(label: string, value: T, options: [T, string][], onPick: (v: T) => void) => (
     <div className="field">
@@ -96,7 +117,7 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
 
   return (
     <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog wide" role="dialog" aria-labelledby="st-title" onKeyDown={(e) => e.key === "Escape" && onClose()}>
+      <div className="dialog settings-dialog" role="dialog" aria-labelledby="st-title" onKeyDown={(e) => e.key === "Escape" && onClose()}>
         <div className="dialog-head">
           <h2 id="st-title">설정</h2>
           <button className="icon-btn ghost" aria-label="닫기" onClick={onClose}>
@@ -104,201 +125,215 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
           </button>
         </div>
 
-        <div className="dialog-body">
-          <section className="settings-section">
-            <h3>보관함</h3>
-            <div className="row-gap" style={{ alignItems: "center" }}>
-              <IconUnlock style={{ color: "var(--ok)", flex: "none" }} />
-              <span style={{ flex: 1, fontWeight: 500 }}>{passwordless ? "비밀번호 없이 사용 중" : "열려 있음"}</span>
-              <button className="btn" title="다른 PC로 옮길 보관함 파일 내보내기" onClick={() => (passwordless ? setSub("export") : onExport())}>
-                <IconExport width={14} height={14} /> 내보내기
-              </button>
-              {!passwordless && (
-                <button className="btn" onClick={onLock}>
-                  잠그기
-                </button>
-              )}
-            </div>
-            <span className="hint">
-              {passwordless ? "앱을 켜면 이 PC의 열쇠 파일로 바로 열립니다. 내 계정으로 도는 프로그램도 읽을 수 있으니 FileVault를 켜 두세요." : "잠그면 열린 연결도 모두 끊깁니다."}
-            </span>
-          </section>
+        <div className="settings-layout">
+          <SideTabs tabs={TABS} active={tab} onPick={pick} idPrefix="st-tab" panelId="st-panel" label="설정 항목" />
 
-          <section className="settings-section">
-            <h3>터미널 글꼴</h3>
-            <div className="grid-font">
-              <label className="field">
-                <span>글꼴</span>
-                <select
-                  className="input"
-                  value={custom ? CUSTOM : s.fontFamily}
-                  onChange={(e) => {
-                    if (e.target.value === CUSTOM) return setCustom(true);
-                    setCustom(false);
-                    updateSettings({ fontFamily: e.target.value });
-                  }}
-                >
-                  <option value="">기본 (Cascadia Mono / SF Mono)</option>
-                  {FONT_PRESETS.map((f) => (
-                    <option key={f} value={f}>
-                      {f}
-                      {installed.get(f) ? "" : " — 설치 안 됨"}
-                    </option>
-                  ))}
-                  <option value={CUSTOM}>직접 입력…</option>
-                </select>
-              </label>
-              <div className="field">
-                <span className="field-label" id="fs-label">크기</span>
-                <div className="stepper" role="group" aria-labelledby="fs-label">
-                  <button className="icon-btn" aria-label="글자 작게" disabled={s.fontSize <= FONT_SIZE.min} onClick={() => updateSettings({ fontSize: s.fontSize - 1 })}>
-                    −
-                  </button>
-                  <input
-                    className="input mono"
-                    inputMode="numeric"
-                    aria-label="글자 크기"
-                    value={s.fontSize}
-                    onChange={(e) => {
-                      const n = Number(e.target.value.replace(/\D/g, ""));
-                      if (n) updateSettings({ fontSize: n });
-                    }}
+          {/* key: 항목을 바꾸면 스크롤이 맨 위에서 시작한다 */}
+          <div key={tab} id="st-panel" className="dialog-body settings-panel" role="tabpanel" aria-labelledby={`st-tab-${tab}`}>
+          {tab === "appearance" && (
+            <>
+              <section className="settings-section">
+                <h3>테마</h3>
+                {seg<ThemeName>("색상 모드", theme, [["light", "라이트"], ["dark", "다크"]], onTheme)}
+              </section>
+
+              <section className="settings-section">
+                <h3>터미널 글꼴</h3>
+                <div className="grid-font">
+                  <label className="field">
+                    <span>글꼴</span>
+                    <Dropdown
+                      value={custom ? CUSTOM : s.fontFamily}
+                      options={[
+                        { value: "", label: "기본 (Cascadia Mono / SF Mono)" },
+                        ...FONT_PRESETS.map((f) => ({ value: f, label: `${f}${installed.get(f) ? "" : " — 설치 안 됨"}` })),
+                        { value: CUSTOM, label: "직접 입력…" },
+                      ]}
+                      onChange={(v) => {
+                        if (v === CUSTOM) return setCustom(true);
+                        setCustom(false);
+                        updateSettings({ fontFamily: v });
+                      }}
+                    />
+                  </label>
+                  <div className="field">
+                    <span className="field-label" id="fs-label">크기</span>
+                    <div className="stepper" role="group" aria-labelledby="fs-label">
+                      <button className="icon-btn" aria-label="글자 작게" disabled={s.fontSize <= FONT_SIZE.min} onClick={() => updateSettings({ fontSize: s.fontSize - 1 })}>
+                        −
+                      </button>
+                      <input
+                        className="input mono"
+                        inputMode="numeric"
+                        aria-label="글자 크기"
+                        value={s.fontSize}
+                        onChange={(e) => {
+                          const n = Number(e.target.value.replace(/\D/g, ""));
+                          if (n) updateSettings({ fontSize: n });
+                        }}
+                      />
+                      <button className="icon-btn" aria-label="글자 크게" disabled={s.fontSize >= FONT_SIZE.max} onClick={() => updateSettings({ fontSize: s.fontSize + 1 })}>
+                        +
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {custom && (
+                  <label className="field">
+                    <span>글꼴 이름</span>
+                    <input className="input" autoFocus value={s.fontFamily} onChange={(e) => updateSettings({ fontFamily: e.target.value })} placeholder="예: Hack, Ubuntu Mono" />
+                  </label>
+                )}
+                {seg("줄 간격", s.lineHeight, LINE_HEIGHTS.map((v) => [v, v.toFixed(1)] as [number, string]), (v) => updateSettings({ lineHeight: v }))}
+                <div className="font-preview" style={{ fontFamily: fontStack(s.fontFamily), fontSize: s.fontSize, lineHeight: s.lineHeight }} aria-label="미리보기">
+                  <div>
+                    <span className="p-user">deploy@prod-web-01</span>:<span className="p-path">~/app</span>$ ls -la
+                  </div>
+                  <div>drwxr-xr-x  5 deploy  staff  160  배포 로그 0O 1lI</div>
+                </div>
+              </section>
+
+              <section className="settings-section">
+                <h3>커서</h3>
+                {seg<CursorStyle>("모양", s.cursorStyle, [["block", "블록 █"], ["bar", "막대 │"], ["underline", "밑줄 _"]], (v) => updateSettings({ cursorStyle: v }))}
+                <label className="check">
+                  <input type="checkbox" checked={s.cursorBlink} onChange={(e) => updateSettings({ cursorBlink: e.target.checked })} />
+                  <span>커서 깜빡임</span>
+                </label>
+              </section>
+            </>
+          )}
+          {tab === "terminal" && (
+            <>
+              <section className="settings-section">
+                <h3>동작</h3>
+                <label className="check">
+                  <input type="checkbox" checked={s.copyOnSelect} onChange={(e) => updateSettings({ copyOnSelect: e.target.checked })} />
+                  <span>
+                    끌어서 고르면 바로 복사
+                    <br />
+                    <span className="hint">복사 단축키를 누르지 않아도 클립보드에 들어갑니다.</span>
+                  </span>
+                </label>
+                <label className="check">
+                  <input type="checkbox" checked={s.rightClickPaste} onChange={(e) => updateSettings({ rightClickPaste: e.target.checked })} />
+                  <span>
+                    오른쪽 클릭으로 붙여넣기
+                    <br />
+                    <span className="hint">PuTTY와 같은 방식입니다. 켜면 분할 메뉴는 Shift+오른쪽 클릭이나 창 머리의 ⋯ 버튼으로 엽니다.</span>
+                  </span>
+                </label>
+                <label className="check">
+                  <input type="checkbox" checked={s.confirmClose} onChange={(e) => updateSettings({ confirmClose: e.target.checked })} />
+                  <span>
+                    연결된 창을 닫을 때 묻기
+                    <br />
+                    <span className="hint">닫기 확인에서 '다시 묻지 않음'을 골랐다면 여기서 다시 켭니다.</span>
+                  </span>
+                </label>
+                <label className="field">
+                  <span>스크롤 기록</span>
+                  <Dropdown
+                    value={s.scrollback}
+                    options={[...SCROLLBACKS, ...(SCROLLBACKS.includes(s.scrollback) ? [] : [s.scrollback])].map((n) => ({ value: n, label: `${n.toLocaleString("ko-KR")}줄` }))}
+                    onChange={(scrollback) => updateSettings({ scrollback })}
                   />
-                  <button className="icon-btn" aria-label="글자 크게" disabled={s.fontSize >= FONT_SIZE.max} onClick={() => updateSettings({ fontSize: s.fontSize + 1 })}>
-                    +
+                </label>
+              </section>
+            </>
+          )}
+          {tab === "security" && (
+            <>
+              <section className="settings-section">
+                <h3>보관함</h3>
+                <div className="row-gap" style={{ alignItems: "center" }}>
+                  <IconUnlock style={{ color: "var(--ok)", flex: "none" }} />
+                  <span style={{ flex: 1, fontWeight: 500 }}>{passwordless ? "비밀번호 없이 사용 중" : "열려 있음"}</span>
+                  <button className="btn" title="다른 PC로 옮길 보관함 파일 내보내기" onClick={() => (passwordless ? setSub("export") : onExport())}>
+                    <IconExport width={14} height={14} /> 내보내기
+                  </button>
+                  {!passwordless && (
+                    <button className="btn" onClick={onLock}>
+                      잠그기
+                    </button>
+                  )}
+                </div>
+                <span className="hint">
+                  {passwordless ? "앱을 켜면 이 PC의 열쇠 파일로 바로 열립니다. 내 계정으로 도는 프로그램도 읽을 수 있으니 FileVault를 켜 두세요." : "잠그면 열린 연결도 모두 끊깁니다."}
+                </span>
+              </section>
+
+              <section className="settings-section">
+                <h3>잠금과 비밀번호</h3>
+                {!passwordless && (
+                <label className="field">
+                  <span>자동 잠금</span>
+                  <Dropdown
+                    value={s.autoLockMinutes}
+                    options={AUTO_LOCK_CHOICES.map((m) => ({ value: m, label: m === 0 ? "잠그지 않음" : `${m}분 동안 입력이 없으면 잠금` }))}
+                    onChange={(autoLockMinutes) => updateSettings({ autoLockMinutes })}
+                  />
+                  <span className="hint">잠그면 열린 연결도 모두 끊깁니다.</span>
+                </label>
+                )}
+                <div className="row-gap">
+                  {passwordless ? (
+                    <button className="btn" onClick={() => setSub("enable")}>
+                      마스터 비밀번호 켜기
+                    </button>
+                  ) : (
+                    <>
+                      <button className="btn" onClick={() => setSub("password")}>
+                        마스터 비밀번호 바꾸기
+                      </button>
+                      <button className="btn" onClick={() => setSub("disable")}>
+                        마스터 비밀번호 끄기
+                      </button>
+                    </>
+                  )}
+                  <button className="btn" onClick={() => setSub("hosts")}>
+                    알려진 서버 관리
                   </button>
                 </div>
-              </div>
-            </div>
-            {custom && (
-              <label className="field">
-                <span>글꼴 이름</span>
-                <input className="input" autoFocus value={s.fontFamily} onChange={(e) => updateSettings({ fontFamily: e.target.value })} placeholder="예: Hack, Ubuntu Mono" />
-              </label>
-            )}
-            {seg("줄 간격", s.lineHeight, LINE_HEIGHTS.map((v) => [v, v.toFixed(1)] as [number, string]), (v) => updateSettings({ lineHeight: v }))}
-            <div className="font-preview" style={{ fontFamily: fontStack(s.fontFamily), fontSize: s.fontSize, lineHeight: s.lineHeight }} aria-label="미리보기">
-              <div>
-                <span className="p-user">deploy@prod-web-01</span>:<span className="p-path">~/app</span>$ ls -la
-              </div>
-              <div>drwxr-xr-x  5 deploy  staff  160  배포 로그 0O 1lI</div>
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <h3>커서</h3>
-            {seg<CursorStyle>("모양", s.cursorStyle, [["block", "블록 █"], ["bar", "막대 │"], ["underline", "밑줄 _"]], (v) => updateSettings({ cursorStyle: v }))}
-            <label className="check">
-              <input type="checkbox" checked={s.cursorBlink} onChange={(e) => updateSettings({ cursorBlink: e.target.checked })} />
-              <span>커서 깜빡임</span>
-            </label>
-          </section>
-
-          <section className="settings-section">
-            <h3>동작</h3>
-            <label className="check">
-              <input type="checkbox" checked={s.copyOnSelect} onChange={(e) => updateSettings({ copyOnSelect: e.target.checked })} />
-              <span>
-                끌어서 고르면 바로 복사
-                <br />
-                <span className="hint">복사 단축키를 누르지 않아도 클립보드에 들어갑니다.</span>
-              </span>
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={s.rightClickPaste} onChange={(e) => updateSettings({ rightClickPaste: e.target.checked })} />
-              <span>
-                오른쪽 클릭으로 붙여넣기
-                <br />
-                <span className="hint">PuTTY와 같은 방식입니다. 켜면 분할 메뉴는 Shift+오른쪽 클릭이나 창 머리의 ⋯ 버튼으로 엽니다.</span>
-              </span>
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={s.confirmClose} onChange={(e) => updateSettings({ confirmClose: e.target.checked })} />
-              <span>
-                연결된 창을 닫을 때 묻기
-                <br />
-                <span className="hint">닫기 확인에서 '다시 묻지 않음'을 골랐다면 여기서 다시 켭니다.</span>
-              </span>
-            </label>
-            <label className="field">
-              <span>스크롤 기록</span>
-              <select className="input" value={s.scrollback} onChange={(e) => updateSettings({ scrollback: Number(e.target.value) })}>
-                {SCROLLBACKS.map((n) => (
-                  <option key={n} value={n}>
-                    {n.toLocaleString("ko-KR")}줄
-                  </option>
-                ))}
-                {!SCROLLBACKS.includes(s.scrollback) && <option value={s.scrollback}>{s.scrollback.toLocaleString("ko-KR")}줄</option>}
-              </select>
-            </label>
-          </section>
-
-          <section className="settings-section">
-            <h3>보안</h3>
-            {!passwordless && (
-            <label className="field">
-              <span>자동 잠금</span>
-              <select className="input" value={s.autoLockMinutes} onChange={(e) => updateSettings({ autoLockMinutes: Number(e.target.value) })}>
-                {AUTO_LOCK_CHOICES.map((m) => (
-                  <option key={m} value={m}>
-                    {m === 0 ? "잠그지 않음" : `${m}분 동안 입력이 없으면 잠금`}
-                  </option>
-                ))}
-              </select>
-              <span className="hint">잠그면 열린 연결도 모두 끊깁니다.</span>
-            </label>
-            )}
-            <div className="row-gap">
-              {passwordless ? (
-                <button className="btn" onClick={() => setSub("enable")}>
-                  마스터 비밀번호 켜기
-                </button>
-              ) : (
-                <>
-                  <button className="btn" onClick={() => setSub("password")}>
-                    마스터 비밀번호 바꾸기
+              </section>
+            </>
+          )}
+          {tab === "shortcuts" && (
+            <>
+              <section className="settings-section">
+                <h3>단축키</h3>
+                <dl className="shortcuts">
+                  {SHORTCUTS.map(([what, key]) => (
+                    <div key={what}>
+                      <dt>{what}</dt>
+                      <dd>{key}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            </>
+          )}
+          {tab === "logs" && (
+            <>
+              <section className="settings-section">
+                <h3>세션 기록·진단 로그</h3>
+                <div className="row-gap" style={{ alignItems: "center" }}>
+                  <span className="hint" style={{ flex: 1 }}>
+                    세션 편집 → 고급에서 '출력 기록 저장'을 켠 세션의 출력과, 연결 실패 같은 오류 원인(sshbook-app.log)이 이 폴더에 남습니다. 비밀번호는 남기지 않습니다.
+                  </span>
+                  <button className="btn" onClick={onOpenLogs}>
+                    기록 폴더 열기
                   </button>
-                  <button className="btn" onClick={() => setSub("disable")}>
-                    마스터 비밀번호 끄기
-                  </button>
-                </>
-              )}
-              <button className="btn" onClick={() => setSub("hosts")}>
-                알려진 서버 관리
-              </button>
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <h3>세션 기록·진단 로그</h3>
-            <div className="row-gap" style={{ alignItems: "center" }}>
-              <span className="hint" style={{ flex: 1 }}>
-                세션 편집 → 고급에서 '출력 기록 저장'을 켠 세션의 출력과, 연결 실패 같은 오류 원인(sshbook-app.log)이 이 폴더에 남습니다. 비밀번호는 남기지 않습니다.
-              </span>
-              <button className="btn" onClick={onOpenLogs}>
-                기록 폴더 열기
-              </button>
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <h3>화면</h3>
-            {seg<ThemeName>("테마", theme, [["light", "라이트"], ["dark", "다크"]], onTheme)}
-          </section>
-
-          <UpdateSection />
-
-          <section className="settings-section">
-            <h3>단축키</h3>
-            <dl className="shortcuts">
-              {SHORTCUTS.map(([what, key]) => (
-                <div key={what}>
-                  <dt>{what}</dt>
-                  <dd>{key}</dd>
                 </div>
-              ))}
-            </dl>
-          </section>
+              </section>
+            </>
+          )}
+          {tab === "update" && (
+            <>
+              <UpdateSection />
+            </>
+          )}
+          </div>
         </div>
 
         <div className="dialog-foot">
