@@ -4719,7 +4719,7 @@ dependencies = [
 
 [[package]]
 name = "sshbook"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
