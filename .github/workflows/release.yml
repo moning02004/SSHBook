@@ -98,6 +98,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          # 서명 키를 쓰는 작업이라 캐시를 자동으로 켜지 않는다.
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
