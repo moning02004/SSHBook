@@ -1,0 +1,141 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const MASTER = "Tiger-Moon-Lake-42";
+
+const terminal = (page: Page) => page.locator(".xterm-rows").last();
+
+async function createVault(page: Page) {
+  await page.goto("/");
+  const fields = page.locator('input[type="password"]');
+  await fields.nth(0).fill(MASTER);
+  await fields.nth(1).fill(MASTER);
+  await page.getByRole("button", { name: "만들기", exact: true }).click();
+  await expect(page.getByRole("button", { name: "새 세션" })).toBeVisible();
+}
+
+async function openLocal(page: Page) {
+  await page.getByTitle("localhost 연결").click();
+  await expect(terminal(page)).toContainText("localhost $");
+}
+
+async function lockAndUnlock(page: Page) {
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "잠그기", exact: true }).click();
+  await page.locator("[role=alertdialog] .danger-fill").click();
+  const field = page.locator('input[type="password"]');
+  await expect(field).toHaveCount(1);
+  await field.fill(MASTER);
+  await page.getByRole("button", { name: "잠금 해제", exact: true }).click();
+}
+
+test("보관함 → 연결 → 분할 → 잠금 → 끊긴 채로 복원 → 다시 연결", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  await page.keyboard.press("Alt+Shift+ArrowRight");
+  await expect(page.locator(".group")).toHaveCount(2);
+  // 배치가 저장될 시간을 준다.
+  await page.waitForTimeout(600);
+
+  await lockAndUnlock(page);
+  await expect(page.locator(".group")).toHaveCount(2);
+  await expect(page.locator(".xterm-rows").first()).toContainText("연결되지 않음");
+  await expect(page.getByRole("button", { name: "다시 열기" })).toHaveCount(0);
+
+  await page.locator(".xterm-helper-textarea").last().focus();
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+r" : "Control+r");
+  await expect(page.locator(".xterm-rows", { hasText: "$" }).first()).toBeVisible();
+});
+
+test("새 세션은 단계별로 입력하고 저장하면 바로 연결한다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "새 세션" }).click();
+  const dialog = page.locator(".session-editor");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText("호스트를 입력하세요.");
+
+  await dialog.getByPlaceholder("10.0.1.21 또는 example.com").fill("e2e.internal");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await expect(dialog.getByRole("tab", { name: "인증" })).toHaveAttribute("aria-selected", "true");
+  await dialog.getByPlaceholder("deploy").fill("tester");
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("tab", { name: "표시" })).toHaveAttribute("aria-selected", "true");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await dialog.getByRole("button", { name: "저장하고 연결" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(terminal(page)).toContainText("처음 연결하는 서버");
+  await page.keyboard.type("yes");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("비밀번호");
+  await page.keyboard.type("test-only");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("e2e.internal $");
+  await expect(terminal(page)).not.toContainText("test-only");
+});
+
+test("호스트 키 확인은 ESC로 취소한다", async ({ page }) => {
+  await createVault(page);
+  await page.getByTitle("prod-web-01 연결").click();
+  await expect(terminal(page)).toContainText("ESC로 취소");
+  await page.keyboard.press("Escape");
+  await expect(terminal(page)).toContainText("연결을 취소했습니다");
+});
+
+test("여러 줄 붙여넣기는 먼저 묻고 거절하면 입력하지 않는다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const paste = (text: string) =>
+    page.locator(".xterm-helper-textarea").last().evaluate((el, value) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", value);
+      el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    }, text);
+  let asked = "";
+  page.once("dialog", async (d) => {
+    asked = d.message();
+    await d.dismiss();
+  });
+  await paste("echo one\nrm -rf x\n");
+  await expect.poll(() => asked).toContain("2줄");
+  await expect(terminal(page)).not.toContainText("rm -rf");
+});
+
+test("한글 조합 입력은 완성된 글자로 한 번만 보낸다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const sent = await page.locator(".xterm-helper-textarea").last().evaluate(async (el) => {
+    const { api } = await import("/src/lib/api.ts" as string);
+    const out: string[] = [];
+    api.termWrite = async (_id: string, data: string) => void out.push(data);
+    const ta = el as HTMLTextAreaElement;
+    ta.focus();
+    ta.value = "";
+    ta.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+    for (const step of ["ㅎ", "하", "한", "한ㄱ", "한그", "한글"]) {
+      ta.value = step;
+      ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: step }));
+      ta.dispatchEvent(new InputEvent("input", { data: step, inputType: "insertCompositionText", isComposing: true }));
+    }
+    ta.dispatchEvent(new CompositionEvent("compositionend", { data: "한글" }));
+    await new Promise((r) => setTimeout(r, 100));
+    return out;
+  });
+  expect(sent.join("")).toContain("한글");
+  expect(sent.join("")).not.toContain("ㅎ");
+});
+
+test("~/.ssh/config에서 없는 호스트만 가져온다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "가져오기" }).click();
+  await page.locator(".settings-panel").getByRole("button", { name: "가져오기" }).click();
+  const dialog = page.getByRole("dialog", { name: "~/.ssh/config 가져오기" });
+  await expect(dialog.getByText("이미 있음")).toBeVisible();
+  await dialog.getByRole("button", { name: "2개 가져오기" }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole("button", { name: "닫기", exact: true }).first().click();
+  await expect(page.locator(".session .name", { hasText: "staging" })).toBeVisible();
+  await expect(page.locator(".session .name", { hasText: "bastion" })).toBeVisible();
+});

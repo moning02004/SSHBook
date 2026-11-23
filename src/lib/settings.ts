@@ -52,7 +52,7 @@ export const DEFAULT_SETTINGS: Settings = {
   copyOnSelect: false,
   rightClickPaste: false,
   confirmClose: true,
-  autoLockMinutes: 0,
+  autoLockMinutes: 15,
 };
 
 /** 한글은 고른 글꼴에 없을 수 있으므로 한글 글꼴을 뒤에 붙인다. */

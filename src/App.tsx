@@ -883,6 +883,7 @@ export function App() {
           passwordless={status.passwordless}
           onVaultChanged={refresh}
           onExport={(pw) => void exportVault(pw)}
+          sessions={sessions}
           onLock={() => {
             // 연결된 탭이 있으면 묻는 창이 설정에 가리지 않게 먼저 닫는다.
             setShowSettings(false);

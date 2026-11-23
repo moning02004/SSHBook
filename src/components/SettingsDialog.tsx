@@ -13,11 +13,13 @@ import {
   AUTO_LOCK_CHOICES,
   type CursorStyle,
 } from "../lib/settings";
+import type { Session } from "../lib/sessions";
 import type { ThemeName } from "../lib/theme";
 import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { Dropdown } from "./Dropdown";
 import { IconClose, IconExport, IconUnlock } from "./Icons";
+import { ImportSshConfigDialog } from "./ImportSshConfigDialog";
 import { KnownHostsDialog } from "./KnownHostsDialog";
 import { PasswordModeDialog } from "./PasswordModeDialog";
 import { SideTabs } from "./SideTabs";
@@ -41,6 +43,8 @@ interface Props {
   onExport: (password?: string) => void;
   /** 보관함 잠그기 */
   onLock: () => void;
+  /** 지금 세션 목록(가져오기에서 중복을 가린다) */
+  sessions: Session[];
   onClose: () => void;
 }
 
@@ -75,13 +79,14 @@ const SHORTCUTS: [string, string][] = [
 
 const CUSTOM = "__custom__";
 
-type SettingsTab = "appearance" | "terminal" | "security" | "shortcuts" | "logs" | "update";
+type SettingsTab = "appearance" | "terminal" | "security" | "shortcuts" | "import" | "logs" | "update";
 
 const TABS: [SettingsTab, string][] = [
   ["appearance", "화면"],
   ["terminal", "터미널"],
   ["security", "보안"],
   ["shortcuts", "단축키"],
+  ["import", "가져오기"],
   ["logs", "기록"],
   ["update", "업데이트"],
 ];
@@ -90,8 +95,8 @@ const TABS: [SettingsTab, string][] = [
 let lastTab: SettingsTab = "appearance";
 
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
-export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, onClose }: Props) {
-  const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | null>(null);
+export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, sessions, onClose }: Props) {
+  const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | "sshconfig" | null>(null);
   const s = useSettings();
   const installed = useMemo(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])), []);
   const isPreset = s.fontFamily === "" || FONT_PRESETS.includes(s.fontFamily);
@@ -313,6 +318,21 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
               </section>
             </>
           )}
+          {tab === "import" && (
+            <>
+              <section className="settings-section">
+                <h3>~/.ssh/config</h3>
+                <div className="row-gap" style={{ alignItems: "center" }}>
+                  <span className="hint" style={{ flex: 1 }}>
+                    쓰던 SSH 설정의 호스트를 골라 세션으로 만듭니다. 설정 파일은 바꾸지 않습니다.
+                  </span>
+                  <button className="btn" onClick={() => setSub("sshconfig")}>
+                    가져오기
+                  </button>
+                </div>
+              </section>
+            </>
+          )}
           {tab === "logs" && (
             <>
               <section className="settings-section">
@@ -357,6 +377,16 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
         />
       )}
       {sub === "hosts" && <KnownHostsDialog onClose={() => setSub(null)} />}
+      {sub === "sshconfig" && (
+        <ImportSshConfigDialog
+          sessions={sessions}
+          onClose={() => setSub(null)}
+          onImported={async (m) => {
+            await onVaultChanged();
+            onNotice(m);
+          }}
+        />
+      )}
       {(sub === "disable" || sub === "enable" || sub === "export") && (
         <PasswordModeDialog
           mode={sub}

@@ -127,7 +127,24 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_ID: ${{ needs.create-release.outputs.id }}
     steps:
-      - env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/${{ needs.create-release.outputs.id }}" -F draft=false -f make_latest=true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 앱이 GitHub API 호출 제한에 걸리지 않게 latest.json을 공개 다운로드 주소로 바꾼다.
+      - name: Use public download URLs in latest.json
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          asset_id=$(jq -er '.assets[] | select(.name == "latest.json") | .id' "$RUNNER_TEMP/release.json")
+          gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$RUNNER_TEMP/latest.json"
+          node scripts/fix-updater-urls.mjs "$RUNNER_TEMP/latest.json" "$RUNNER_TEMP/release.json" "$GITHUB_REPOSITORY"
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+          gh api -X POST -H "Content-Type: application/json" --input "$RUNNER_TEMP/latest.json" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=latest.json" > /dev/null
+
+      - run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true

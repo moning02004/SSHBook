@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -5,6 +6,8 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  // e2e/는 Playwright가 돌린다.
+  test: { include: ["src/**/*.test.ts"] },
   server: {
     port: 1420,
     strictPort: true,

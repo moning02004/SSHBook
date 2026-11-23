@@ -5,6 +5,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
+import type { AuthPrompt } from "./api";
 import { api, parseOpenError, type OpenOptions } from "./api";
 import { pasteWarning, sanitizePaste } from "./paste";
 import { fontStack, getSettings, subscribeSettings, type Settings } from "./settings";
@@ -52,6 +53,10 @@ export interface PaneEntry {
   search: SearchAddon;
   /** 터미널에서 입력을 기다리는 중이면 그 입력을 취소한다(창을 닫거나 잠글 때) */
   cancelPrompt: (() => void) | null;
+  /** 접속 중 서버 질문(OTP)을 이 창으로 돌려받는 표시 */
+  promptKey: string;
+  /** 서버 질문에 답하는 중이면 연결 취소 대신 입력칸이 키를 받는다 */
+  authPrompting: boolean;
   /** 서버 응답 시간(ms). SSH만, 모르면 null */
   latency: number | null;
 }
@@ -133,6 +138,7 @@ async function wireEvents() {
     if (e) showExit(e, code);
     else earlyExit.set(id, code);
   });
+  await api.onAuthPrompt((req) => void answerAuth(req));
   await api.onTermLatency(({ id, ms }) => {
     const e = byBackend.get(id);
     if (e && e.status === "live" && e.latency !== ms) {
@@ -196,6 +202,37 @@ function readLine(entry: PaneEntry, prompt: string, hidden: boolean, typedOnly =
   });
 }
 
+/** 서버가 접속 중에 묻는 OTP 같은 질문을 터미널에서 받아 돌려준다. */
+async function answerAuth(req: AuthPrompt) {
+  const e = [...entries.values()].find((x) => x.promptKey === req.key);
+  if (!e) return void api.termAuthAnswer(req.id, null);
+  const cancelOpen = e.cancelPrompt;
+  e.authPrompting = true;
+  e.term.write("\r\x1b[2K");
+  for (const line of [req.name, req.instructions]) {
+    if (line) e.term.write(`${line.replace(/\n/g, "\r\n")}\r\n`);
+  }
+  const answers: string[] = [];
+  let cancelled = false;
+  for (const p of req.prompts) {
+    const v = await readLine(e, `${p.text || "인증 코드:"} ${DIM}(ESC로 취소)${RESET} `, !p.echo);
+    if (v === null) {
+      cancelled = true;
+      break;
+    }
+    answers.push(v);
+  }
+  e.authPrompting = false;
+  e.cancelPrompt = cancelOpen;
+  if (cancelled) {
+    void api.termAuthAnswer(req.id, null);
+    cancelOpen?.();
+    return;
+  }
+  e.term.write(`${DIM}연결 중… (ESC로 취소)${RESET}`);
+  void api.termAuthAnswer(req.id, answers);
+}
+
 /** 접속을 시도하는 동안 안내를 보여 주고, ESC·Ctrl+C면 취소한다(취소하면 null). */
 function openCancellable(entry: PaneEntry, opts: OpenOptions): Promise<string | null> {
   const { term, sessionId } = entry;
@@ -216,6 +253,7 @@ function openCancellable(entry: PaneEntry, opts: OpenOptions): Promise<string | 
     entry.cancelPrompt = cancel;
     // 방향키 등은 ESC로 시작하는 여러 글자라서, ESC 하나만 눌렀을 때만 취소한다.
     const sub = term.onData((d) => {
+      if (entry.authPrompting) return;
       if (d === "\x1b" || d === "\x03") cancel();
     });
     api.termOpen(sessionId, term.cols, term.rows, opts).then(
@@ -243,7 +281,7 @@ function fail(entry: PaneEntry, text: string): null {
 /** 접속을 시도하고, 호스트 키 확인이나 비밀번호가 필요하면 터미널에서 물어본 뒤 다시 시도한다. */
 async function connect(entry: PaneEntry): Promise<string | null> {
   const { term } = entry;
-  const opts: OpenOptions = {};
+  const opts: OpenOptions = { promptKey: entry.promptKey };
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
       const id = await openCancellable(entry, opts);
@@ -338,6 +376,8 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     liveId: null,
     search,
     cancelPrompt: null,
+    promptKey: crypto.randomUUID(),
+    authPrompting: false,
     latency: null,
     backendId: Promise.resolve(null),
   };

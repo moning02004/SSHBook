@@ -7,6 +7,7 @@ mod nopass;
 mod pty;
 mod sftp;
 mod ssh;
+mod sshconfig;
 mod termlog;
 mod vault;
 
@@ -36,6 +37,9 @@ impl Term {
     }
 }
 
+/// 서버 질문에 대한 답을 넘겨주는 곳(None이면 취소)
+type AuthReply = tokio::sync::oneshot::Sender<Option<Vec<Zeroizing<String>>>>;
+
 #[derive(Default)]
 struct AppState {
     vault: Mutex<Option<OpenVault>>,
@@ -44,6 +48,8 @@ struct AppState {
     pending_hosts: Mutex<ssh::PendingHosts>,
     /// 잠글 때마다 올라간다. 잠그는 사이에 끝난 접속을 알아채서 바로 닫는다.
     lock_generation: AtomicU64,
+    /// 접속 중 OTP 같은 질문의 답을 기다리는 곳
+    pending_auth: Mutex<HashMap<String, AuthReply>>,
     /// 진행 중인 파일 전송의 취소 표시 (전송 id → 표시)
     transfers: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
 }
@@ -175,6 +181,8 @@ fn vault_lock(state: State<'_, AppState>) {
         t.close();
     }
     lock(&state.pending_hosts).clear();
+    // 답을 기다리던 접속은 취소로 끝난다.
+    lock(&state.pending_auth).clear();
     // OpenVault가 버려지면서 키가 메모리에서 지워진다(Zeroizing).
     *lock(&state.vault) = None;
 }
@@ -477,6 +485,7 @@ fn target_for(
         user,
         auth,
         known_key,
+        kbd: None,
     })
 }
 
@@ -557,6 +566,7 @@ fn open_logs_dir(app: AppHandle) -> CmdResult<String> {
 
 /// password / passphrase는 저장된 값이 없거나 틀려서 터미널에서 다시 물어본 값이다. 저장하지 않는다.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn term_open(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -565,6 +575,7 @@ async fn term_open(
     rows: u16,
     password: Option<String>,
     passphrase: Option<String>,
+    prompt_key: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let generation = state.lock_generation.load(Ordering::SeqCst);
@@ -572,7 +583,14 @@ async fn term_open(
         .inspect_err(|e| applog::warn(&format!("연결 준비 실패: {e}")))?;
     let term = match plan {
         Plan::Local { shell, cwd } => Term::Local(pty::spawn(app, id.clone(), shell, cwd, cols, rows)?),
-        Plan::Ssh { connect, log } => {
+        Plan::Ssh { mut connect, log } => {
+            if let Some(key) = prompt_key {
+                let asker = auth_asker(app.clone(), key);
+                connect.target.kbd = Some(asker.clone());
+                if let Some(j) = connect.jump.as_mut() {
+                    j.kbd = Some(asker);
+                }
+            }
             let t = &connect.target;
             let via = connect.jump.as_ref().map(|j| format!(" (점프 {}:{})", j.host, j.port));
             let dest = format!("{}@{}:{}{}", t.user, t.host, t.port, via.unwrap_or_default());
@@ -633,6 +651,58 @@ fn known_host_remove(state: State<'_, AppState>, host_id: String) -> CmdResult<(
 }
 
 /// 사용자가 지문을 확인한 서버 키를 보관함에 저장한다.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AuthPromptEvent {
+    key: String,
+    id: String,
+    #[serde(flatten)]
+    request: ssh::KbdRequest,
+}
+
+/// 접속 중 서버의 질문(OTP 등)을 화면으로 보내고 답을 기다린다.
+fn auth_asker(app: AppHandle, key: String) -> ssh::KbdAsker {
+    Arc::new(move |request| {
+        let (app, key) = (app.clone(), key.clone());
+        Box::pin(async move {
+            let id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let state = app.state::<AppState>();
+            lock(&state.pending_auth).insert(id.clone(), tx);
+            let event = AuthPromptEvent {
+                key,
+                id: id.clone(),
+                request,
+            };
+            let sent = app.emit("term-auth-prompt", event).is_ok();
+            let answer = if sent {
+                tokio::time::timeout(std::time::Duration::from_secs(170), rx).await
+            } else {
+                Ok(Ok(None))
+            };
+            lock(&state.pending_auth).remove(&id);
+            answer.ok().and_then(|r| r.ok()).flatten()
+        })
+    })
+}
+
+/// 서버 질문에 대한 답. None이면 취소.
+#[tauri::command]
+fn term_auth_answer(state: State<'_, AppState>, id: String, answers: Option<Vec<String>>) {
+    if let Some(tx) = lock(&state.pending_auth).remove(&id) {
+        let _ = tx.send(answers.map(|a| a.into_iter().map(Zeroizing::new).collect()));
+    }
+}
+
+/// `~/.ssh/config`의 호스트 목록(가져오기 화면용)
+#[tauri::command]
+fn ssh_config_hosts(state: State<'_, AppState>) -> CmdResult<Vec<sshconfig::ConfigHost>> {
+    if lock(&state.vault).is_none() {
+        return Err(LOCKED.into());
+    }
+    Ok(sshconfig::load(&pty::expand_home("~/.ssh/config")))
+}
+
 #[tauri::command]
 fn host_trust(state: State<'_, AppState>, host_id: String, fingerprint: String) -> CmdResult<()> {
     // 사용자가 화면에서 본 지문의 키만 저장한다.
@@ -971,6 +1041,8 @@ pub fn run() {
             term_write,
             term_resize,
             term_close,
+            term_auth_answer,
+            ssh_config_hosts,
         ])
         .run(tauri::generate_context!())
         .expect("앱을 시작하지 못했습니다");

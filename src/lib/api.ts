@@ -85,6 +85,27 @@ export interface TermExit {
 export interface OpenOptions {
   password?: string;
   passphrase?: string;
+  /** 접속 중 서버가 묻는 OTP 같은 질문을 이 창으로 돌려받기 위한 표시 */
+  promptKey?: string;
+}
+
+/** 접속 중 서버의 질문(keyboard-interactive). 문구는 제어 문자를 뺀 값이다. */
+export interface AuthPrompt {
+  key: string;
+  id: string;
+  name: string;
+  instructions: string;
+  prompts: { text: string; echo: boolean }[];
+}
+
+/** ~/.ssh/config의 호스트 */
+export interface ConfigHost {
+  alias: string;
+  host: string;
+  port: number;
+  user: string | null;
+  identityFile: string | null;
+  proxyJump: string | null;
 }
 
 /** 처음 보는 서버(또는 키가 바뀐 서버)의 호스트 키 */
@@ -157,6 +178,10 @@ export interface Backend {
   sftpRename(termId: string, from: string, to: string): Promise<void>;
   /** sessionId가 없으면 OS 기본 셸을 연다. 터미널 id를 돌려준다. */
   termOpen(sessionId: string | null, cols: number, rows: number, opts?: OpenOptions): Promise<string>;
+  /** 서버 질문에 답한다. null이면 취소 */
+  termAuthAnswer(id: string, answers: string[] | null): Promise<void>;
+  onAuthPrompt(cb: (e: AuthPrompt) => void): Promise<() => void>;
+  sshConfigHosts(): Promise<ConfigHost[]>;
   /** 사용자가 확인한 호스트 키를 보관함에 저장한다 */
   hostTrust(hostId: string, fingerprint: string): Promise<void>;
   knownHostsList(): Promise<KnownHost[]>;
@@ -202,7 +227,10 @@ const tauriBackend: Backend = {
   sftpRemove: (id, path, isDir) => invoke("sftp_remove", { id, path, isDir }),
   sftpRename: (id, from, to) => invoke("sftp_rename", { id, from, to }),
   termOpen: (sessionId, cols, rows, opts) =>
-    invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null }),
+    invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null, promptKey: opts?.promptKey ?? null }),
+  termAuthAnswer: (id, answers) => invoke("term_auth_answer", { id, answers }),
+  onAuthPrompt: (cb) => listen<AuthPrompt>("term-auth-prompt", (e) => cb(e.payload)),
+  sshConfigHosts: () => invoke("ssh_config_hosts"),
   hostTrust: (hostId, fingerprint) => invoke("host_trust", { hostId, fingerprint }),
   knownHostsList: () => invoke("known_hosts_list"),
   knownHostRemove: (hostId) => invoke("known_host_remove", { hostId }),
@@ -463,6 +491,17 @@ function createMockBackend(): Backend {
         if (`${s?.host}:${s?.port ?? 22}` === hostId) trusted.delete(id);
       }
     },
+    async termAuthAnswer() {},
+    async onAuthPrompt() {
+      return () => {};
+    },
+    async sshConfigHosts() {
+      return [
+        { alias: "staging", host: "10.0.2.15", port: 22, user: "deploy", identityFile: "~/.ssh/id_ed25519", proxyJump: "bastion" },
+        { alias: "bastion", host: "bastion.example.com", port: 2222, user: "ops", identityFile: null, proxyJump: null },
+        { alias: "prod-web-01", host: "10.0.1.21", port: 22, user: "deploy", identityFile: null, proxyJump: null },
+      ];
+    },
     async onTermData(cb) {
       dataSubs.add(cb);
       return () => dataSubs.delete(cb);
@@ -478,7 +517,8 @@ function createMockBackend(): Backend {
   };
 }
 
-export const api: Backend = inTauri ? tauriBackend : createMockBackend();
+// 가짜 백엔드는 개발 미리보기 전용이다. 이 조건 덕분에 배포 빌드에서는 코드째 빠진다.
+export const api: Backend = import.meta.env.DEV && !inTauri ? createMockBackend() : tauriBackend;
 
 export function errorText(e: unknown): string {
   if (typeof e === "string") return e;

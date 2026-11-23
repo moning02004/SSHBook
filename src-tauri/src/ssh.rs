@@ -26,8 +26,11 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// 인증은 에이전트의 하드웨어 키 터치 등을 기다릴 수 있어서 넉넉히 둔다.
-const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
+/// 인증은 하드웨어 키 터치나 OTP 입력을 기다릴 수 있어서 넉넉히 둔다.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_KBD_ROUNDS: usize = 8;
+const MAX_KBD_PROMPTS: usize = 8;
+const MAX_KBD_TEXT: usize = 500;
 /// 인증 뒤 채널·PTY·셸 요청
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -59,7 +62,30 @@ pub struct Target {
     pub auth: Auth,
     /// 보관함에 저장된 이 서버의 공개 키(OpenSSH 한 줄 형식)
     pub known_key: Option<String>,
+    /// OTP처럼 접속 중에 사용자에게 물어야 할 때 쓴다
+    pub kbd: Option<KbdAsker>,
 }
+
+/// 서버가 묻는 항목(keyboard-interactive). 문구는 제어 문자를 뺀 값이다.
+#[derive(Serialize, Clone, Debug)]
+pub struct KbdField {
+    pub text: String,
+    pub echo: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct KbdRequest {
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<KbdField>,
+}
+
+/// 질문을 사용자에게 보여 주고 답을 받는다. 취소하면 None.
+pub type KbdAsker = Arc<
+    dyn Fn(KbdRequest) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<Zeroizing<String>>>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// 보관함 known_hosts의 키
 pub fn host_id(host: &str, port: u16) -> String {
@@ -418,7 +444,7 @@ async fn establish(t: Target, via: Option<&Handle<Client>>, remote: RemoteMap) -
             return Err(other(&format!("{where_}에 연결하지 못했습니다"), e));
         }
     };
-    match tokio::time::timeout(AUTH_TIMEOUT, authenticate(&mut handle, &t.user, t.auth)).await {
+    match tokio::time::timeout(AUTH_TIMEOUT, authenticate(&mut handle, &t.user, t.auth, t.kbd)).await {
         Ok(r) => r?,
         Err(_) => return Err(OpenError::Other(format!("{where_} 인증: 서버가 응답하지 않습니다"))),
     }
@@ -576,20 +602,137 @@ pub async fn connect(sink: Sink, c: Connect, cols: u16, rows: u16) -> Result<Ssh
 
 // ---- 인증 ----
 
-async fn authenticate(handle: &mut Handle<Client>, user: &str, auth: Auth) -> Result<(), OpenError> {
-    let fail = |e: russh::Error| other("인증 중 오류가 났습니다", e);
+fn auth_error(e: russh::Error) -> OpenError {
+    other("인증 중 오류가 났습니다", e)
+}
+
+fn offers(methods: &russh::MethodSet, kind: russh::MethodKind) -> bool {
+    methods.contains(&kind)
+}
+
+/// 서버가 보낸 문구에서 터미널 제어 문자를 뺀다(화면 조작 방지).
+fn clean_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .take(MAX_KBD_TEXT)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn is_password_prompt(prompts: &[client::Prompt]) -> bool {
+    matches!(prompts, [p] if !p.echo && p.prompt.to_lowercase().contains("password"))
+}
+
+/// keyboard-interactive(OTP·2단계 인증). 성공하면 true, 서버가 거절하면 false.
+/// 비밀번호를 이미 알면 "Password:" 질문에는 그 값으로 답하고 나머지만 사용자에게 묻는다.
+async fn keyboard(
+    handle: &mut Handle<Client>,
+    user: &str,
+    asker: Option<&KbdAsker>,
+    password: Option<&str>,
+) -> Result<bool, OpenError> {
+    let Some(asker) = asker else { return Ok(false) };
+    let mut password = password;
+    let mut reply = handle
+        .authenticate_keyboard_interactive_start(user, None::<String>)
+        .await
+        .map_err(auth_error)?;
+    for _ in 0..MAX_KBD_ROUNDS {
+        let (name, instructions, prompts) = match reply {
+            client::KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            client::KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            client::KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => (name, instructions, prompts),
+        };
+        if prompts.len() > MAX_KBD_PROMPTS {
+            return Err(OpenError::Other("서버가 너무 많은 항목을 물었습니다.".into()));
+        }
+        let answers: Vec<Zeroizing<String>> = if prompts.is_empty() {
+            vec![]
+        } else if let Some(pw) = password.filter(|_| is_password_prompt(&prompts)) {
+            password = None;
+            vec![Zeroizing::new(pw.to_string())]
+        } else {
+            let request = KbdRequest {
+                name: clean_text(&name),
+                instructions: clean_text(&instructions),
+                prompts: prompts
+                    .iter()
+                    .map(|p| KbdField {
+                        text: clean_text(&p.prompt),
+                        echo: p.echo,
+                    })
+                    .collect(),
+            };
+            match asker(request).await {
+                Some(a) if a.len() == prompts.len() => a,
+                _ => return Err(OpenError::Other("연결을 취소했습니다.".into())),
+            }
+        };
+        let plain = answers.iter().map(|a| a.to_string()).collect();
+        reply = handle
+            .authenticate_keyboard_interactive_respond(plain)
+            .await
+            .map_err(auth_error)?;
+    }
+    Err(OpenError::Other("인증 단계가 너무 많습니다.".into()))
+}
+
+fn code_rejected() -> OpenError {
+    OpenError::Other("서버가 입력한 인증 코드를 받아들이지 않았습니다.".into())
+}
+
+async fn authenticate(
+    handle: &mut Handle<Client>,
+    user: &str,
+    auth: Auth,
+    kbd: Option<KbdAsker>,
+) -> Result<(), OpenError> {
+    use russh::MethodKind::{KeyboardInteractive, Password};
     match auth {
-        Auth::Password(None) => Err(ask("password", "")),
+        Auth::Password(None) => {
+            // 서버가 비밀번호 없이 OTP만 받을 수도 있어서 방법부터 확인한다.
+            match handle.authenticate_none(user).await.map_err(auth_error)? {
+                client::AuthResult::Success => Ok(()),
+                client::AuthResult::Failure { remaining_methods, .. }
+                    if kbd.is_some()
+                        && !offers(&remaining_methods, Password)
+                        && offers(&remaining_methods, KeyboardInteractive) =>
+                {
+                    if keyboard(handle, user, kbd.as_ref(), None).await? {
+                        Ok(())
+                    } else {
+                        Err(code_rejected())
+                    }
+                }
+                client::AuthResult::Failure { .. } => Err(ask("password", "")),
+            }
+        }
         Auth::Password(Some(pw)) => {
-            let ok = handle
+            match handle
                 .authenticate_password(user, pw.as_str())
                 .await
-                .map_err(fail)?
-                .success();
-            if ok {
-                Ok(())
-            } else {
-                Err(ask("password", "비밀번호가 맞지 않습니다."))
+                .map_err(auth_error)?
+            {
+                client::AuthResult::Success => Ok(()),
+                client::AuthResult::Failure {
+                    remaining_methods,
+                    partial_success,
+                } => {
+                    if offers(&remaining_methods, KeyboardInteractive)
+                        && keyboard(handle, user, kbd.as_ref(), Some(pw.as_str())).await?
+                    {
+                        return Ok(());
+                    }
+                    if partial_success {
+                        return Err(code_rejected());
+                    }
+                    Err(ask("password", "비밀번호가 맞지 않습니다."))
+                }
             }
         }
         Auth::Key { pem, passphrase } => {
@@ -600,45 +743,55 @@ async fn authenticate(handle: &mut Handle<Client>, user: &str, auth: Auth) -> Re
                 Err(e) => return Err(other("개인 키를 읽지 못했습니다", e)),
             };
             let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
-            let ok = handle
+            match handle
                 .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await
-                .map_err(fail)?
-                .success();
-            if ok {
-                Ok(())
-            } else {
-                Err(OpenError::Other(
+                .map_err(auth_error)?
+            {
+                client::AuthResult::Success => Ok(()),
+                // 키는 통과했고 OTP가 더 필요한 경우
+                client::AuthResult::Failure {
+                    remaining_methods,
+                    partial_success: true,
+                } if offers(&remaining_methods, KeyboardInteractive) => {
+                    if keyboard(handle, user, kbd.as_ref(), None).await? {
+                        Ok(())
+                    } else {
+                        Err(code_rejected())
+                    }
+                }
+                client::AuthResult::Failure { .. } => Err(OpenError::Other(
                     "서버가 이 키를 받아들이지 않았습니다. 서버의 authorized_keys를 확인하세요.".into(),
-                ))
+                )),
             }
         }
-        Auth::Agent => agent_auth(handle, user).await,
+        Auth::Agent => agent_auth(handle, user, kbd).await,
     }
 }
 
 #[cfg(windows)]
-async fn agent_auth(handle: &mut Handle<Client>, user: &str) -> Result<(), OpenError> {
+async fn agent_auth(handle: &mut Handle<Client>, user: &str, kbd: Option<KbdAsker>) -> Result<(), OpenError> {
     use russh::keys::agent::client::AgentClient;
     let agent = AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await.map_err(|e| {
         other("SSH 에이전트에 연결하지 못했습니다 (Windows 서비스 'OpenSSH Authentication Agent'가 켜져 있는지 확인하세요)", e)
     })?;
-    try_agent(handle, user, agent).await
+    try_agent(handle, user, agent, kbd).await
 }
 
 #[cfg(not(windows))]
-async fn agent_auth(handle: &mut Handle<Client>, user: &str) -> Result<(), OpenError> {
+async fn agent_auth(handle: &mut Handle<Client>, user: &str, kbd: Option<KbdAsker>) -> Result<(), OpenError> {
     use russh::keys::agent::client::AgentClient;
     let agent = AgentClient::connect_env()
         .await
         .map_err(|e| other("SSH 에이전트에 연결하지 못했습니다 (SSH_AUTH_SOCK을 확인하세요)", e))?;
-    try_agent(handle, user, agent).await
+    try_agent(handle, user, agent, kbd).await
 }
 
 async fn try_agent<R>(
     handle: &mut Handle<Client>,
     user: &str,
     mut agent: russh::keys::agent::client::AgentClient<R>,
+    kbd: Option<KbdAsker>,
 ) -> Result<(), OpenError>
 where
     R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -655,10 +808,19 @@ where
     let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
     for id in ids {
         let key = id.public_key().into_owned();
-        if let Ok(r) = handle.authenticate_publickey_with(user, key, hash, &mut agent).await {
-            if r.success() {
-                return Ok(());
+        match handle.authenticate_publickey_with(user, key, hash, &mut agent).await {
+            Ok(client::AuthResult::Success) => return Ok(()),
+            Ok(client::AuthResult::Failure {
+                remaining_methods,
+                partial_success: true,
+            }) if offers(&remaining_methods, russh::MethodKind::KeyboardInteractive) => {
+                return if keyboard(handle, user, kbd.as_ref(), None).await? {
+                    Ok(())
+                } else {
+                    Err(code_rejected())
+                };
             }
+            _ => {}
         }
     }
     Err(OpenError::Other(
@@ -692,6 +854,42 @@ mod tests {
                 SAuth::Accept
             } else {
                 SAuth::reject()
+            })
+        }
+
+        async fn auth_none(&mut self, user: &str) -> Result<SAuth, Self::Error> {
+            Ok(if user == "otp" {
+                SAuth::Reject {
+                    proceed_with_methods: Some((&[russh::MethodKind::KeyboardInteractive][..]).into()),
+                    partial_success: false,
+                }
+            } else {
+                SAuth::reject()
+            })
+        }
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            user: &str,
+            _: &str,
+            response: Option<server::Response<'a>>,
+        ) -> Result<SAuth, Self::Error> {
+            if user != "otp" {
+                return Ok(SAuth::reject());
+            }
+            Ok(match response {
+                None => SAuth::Partial {
+                    name: "2FA".into(),
+                    instructions: "\x1b[2Jenter code".into(),
+                    prompts: vec![("Code: ".into(), false)].into(),
+                },
+                Some(mut r) => {
+                    if r.next().is_some_and(|b| &b[..] == b"123456") {
+                        SAuth::Accept
+                    } else {
+                        SAuth::reject()
+                    }
+                }
             })
         }
 
@@ -831,6 +1029,7 @@ mod tests {
             user: "tester".into(),
             auth,
             known_key,
+            kbd: None,
         }
     }
 
@@ -928,6 +1127,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, Some(7));
+    }
+
+    fn otp_target(port: u16, code: &'static str, seen: Arc<Mutex<Vec<KbdRequest>>>) -> Target {
+        let mut t = target(port, Auth::Password(None), Some(pub_of(HOST_A)));
+        t.user = "otp".into();
+        t.kbd = Some(Arc::new(move |req| {
+            seen.lock().unwrap().push(req);
+            Box::pin(async move { (!code.is_empty()).then(|| vec![Zeroizing::new(code.to_string())]) })
+        }));
+        t
+    }
+
+    #[tokio::test]
+    async fn otp_prompts_cleaned_and_code_checked() {
+        let port = start_server(HOST_A).await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (s, _rx) = sink();
+        let ok = connect(s, plain(otp_target(port, "123456", seen.clone())), 80, 24).await;
+        assert!(ok.is_ok(), "맞는 코드로 접속되어야 한다");
+        ok.ok().unwrap().close();
+        {
+            let got = seen.lock().unwrap();
+            assert_eq!(got[0].prompts[0].text, "Code:");
+            assert!(!got[0].prompts[0].echo);
+            assert_eq!(got[0].instructions, "[2Jenter code", "ESC는 빠져야 한다");
+        }
+        let (s, _rx) = sink();
+        let bad = connect(s, plain(otp_target(port, "000000", seen.clone())), 80, 24).await;
+        assert!(matches!(bad, Err(OpenError::Other(m)) if m.contains("인증 코드")));
+        let (s, _rx) = sink();
+        let cancelled = connect(s, plain(otp_target(port, "", seen)), 80, 24).await;
+        assert!(matches!(cancelled, Err(OpenError::Other(m)) if m.contains("취소")));
     }
 
     #[tokio::test]

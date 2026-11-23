@@ -424,7 +424,7 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                                 <input
                                   className="input mono"
                                   aria-label="목적지 호스트"
-                                  placeholder={f.kind === "remote" ? "localhost" : "db.internal"}
+                                  placeholder="localhost"
                                   value={f.host ?? ""}
                                   onChange={(e) => setForward(i, { host: e.target.value })}
                                 />

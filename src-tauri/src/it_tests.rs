@@ -32,6 +32,7 @@ fn target(host: &str, port: u16, known_key: Option<String>) -> Target {
         user: USER.into(),
         auth: Auth::Password(Some(Zeroizing::new(PASSWORD.into()))),
         known_key,
+        kbd: None,
     }
 }
 
