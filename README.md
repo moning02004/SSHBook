@@ -9,8 +9,10 @@ Tauri 2 + React + xterm.js.
 
 | OS | 파일 |
 |---|---|
-| Windows 10/11 | `SSHBook_<버전>_x64-setup.exe` (또는 `.msi`) |
+| Windows 10/11 (베타) | `SSHBook_<버전>_x64-setup.exe` (또는 `.msi`) |
 | macOS 11 이상 (Intel·Apple Silicon) | `SSHBook_<버전>_universal.dmg` |
+
+Windows 빌드는 자동 빌드만 확인했고 실기기 점검(`docs/windows-checklist.md`)을 마치기 전까지 베타다.
 
 코드 서명을 하지 않은 빌드라서 처음 실행할 때 OS가 경고한다.
 
