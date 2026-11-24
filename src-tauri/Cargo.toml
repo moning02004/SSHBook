@@ -1,6 +1,6 @@
 [package]
 name = "sshbook"
-version = "1.0.0"
+version = "1.0.1"
 description = "SSHBook — SSH / 로컬 터미널"
 edition = "2021"
 
