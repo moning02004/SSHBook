@@ -222,3 +222,55 @@ test("ESC는 초점이 터미널에 있어도 맨 위 모달만 닫고 셸로 �
     await expect(page.locator(".session-editor")).toHaveCount(0);
   }
 });
+
+test("세션을 다시 누르면 열린 탭으로 가고, 오른쪽 클릭 메뉴로는 새 탭을 더한다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const tabs = page.locator(".gtab");
+  await expect(tabs).toHaveCount(1);
+  await page.getByTitle("localhost 연결 (열린 탭이 있으면 그 탭으로)").click();
+  await expect(tabs).toHaveCount(1);
+
+  await page.locator(".session-row", { hasText: "localhost" }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "새 탭으로 추가" }).click();
+  await expect(tabs).toHaveCount(2);
+
+  // 다른 탭(새 로컬 셸)에 있다가 세션을 누르면 그 세션의 탭으로 돌아온다.
+  await page.getByRole("button", { name: "이 칸에 새 탭 (로컬 셸)" }).click();
+  await expect(tabs).toHaveCount(3);
+  await expect(tabs.nth(2)).toHaveClass(/selected/);
+  await page.getByTitle("localhost 연결 (열린 탭이 있으면 그 탭으로)").click();
+  await expect(tabs).toHaveCount(3);
+  await expect(tabs.nth(2)).not.toHaveClass(/selected/);
+});
+
+test("탭을 휠 클릭하면 닫는다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  await page.getByRole("button", { name: "이 칸에 새 탭 (로컬 셸)" }).click();
+  const tabs = page.locator(".gtab");
+  await expect(tabs).toHaveCount(2);
+  await tabs.first().click({ button: "middle" });
+  const confirm = page.locator("[role=alertdialog] .danger-fill");
+  if (await confirm.isVisible().catch(() => false)) await confirm.click();
+  await expect(tabs).toHaveCount(1);
+});
+
+test("Ctrl+C는 고른 글자가 있으면 복사한다", async ({ page, context, browserName }) => {
+  test.skip(process.platform === "darwin" || browserName !== "chromium", "Windows·Linux 단축키");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await createVault(page);
+  await openLocal(page);
+  await page.evaluate(() => navigator.clipboard.writeText(""));
+  // 마지막 줄(프롬프트 "localhost $")을 끌어서 고른다.
+  const row = page.locator(".xterm-rows").last().locator("> div", { hasText: "localhost $" }).last();
+  const box = (await row.boundingBox())!;
+  await page.mouse.move(box.x + 1, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 300, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await page.keyboard.press("Control+c");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("localhost");
+  // 복사한 뒤에는 선택이 풀려서, 다음 Ctrl+C는 셸로 간다.
+  await expect(page.locator(".xterm-selection div")).toHaveCount(0);
+});

@@ -111,7 +111,11 @@ export function App() {
   const [desk, setDesk] = useState<Desk>(emptyDesk);
   const [panes, setPanes] = useState<Record<string, PaneInfo>>({});
   /** tab: 탭을 오른쪽 클릭, pane: 터미널을 오른쪽 클릭 */
-  const [menu, setMenu] = useState<{ x: number; y: number; paneId: string; kind: "tab" | "pane" } | null>(null);
+  const [menu, setMenu] = useState<
+  | { x: number; y: number; paneId: string; kind: "tab" | "pane" }
+  | { x: number; y: number; session: Session; kind: "session" }
+  | null
+>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [editing, setEditing] = useState<{ session: Session | null } | null>(null);
   const [notice, setNotice] = useState("");
@@ -236,6 +240,15 @@ export function App() {
     const paneId = newId();
     setPanes((p) => ({ ...p, [paneId]: infoFor(sessionId, list) }));
     setDesk((d) => desks.addTab(d, paneId, newId(), groupId));
+  };
+
+  /** 사이드바에서 세션을 눌렀을 때: 이미 열린 탭이 있으면 그 탭으로 가고, 없으면 새로 연다. */
+  const showSession = (sessionId: string) => {
+    const open = desks.allTabs(desk).filter((t) => panes[t]?.sessionId === sessionId);
+    if (open.length === 0) return openTab(sessionId);
+    const target = activeId && open.includes(activeId) ? activeId : open[0];
+    setDesk((d) => desks.activate(d, target));
+    requestAnimationFrame(() => terms.focusPane(target));
   };
 
   /** 같은 세션으로 새로 연결하는 탭 id를 만든다(같은 서버에 하나 더). */
@@ -387,11 +400,22 @@ export function App() {
       { label: tx("명령 모음…"), shortcut: `${K}S`, onSelect: () => void openSnippets() },
       ...(ssh ? ([{ label: sftpPanes.has(paneId) ? tx("파일 창 닫기") : tx("파일 창 열기 (SFTP)"), shortcut: `${K}O`, onSelect: () => toggleSftp(paneId) }] as MenuItem[]) : []),
       "separator",
-      { label: tx("복사"), shortcut: `${K}C`, onSelect: () => terms.copySelection(paneId) },
+      { label: tx("복사"), shortcut: isMac ? `${K}C` : "Ctrl+C", onSelect: () => terms.copySelection(paneId) },
       { label: tx("붙여넣기"), shortcut: `${K}V`, onSelect: () => void terms.pasteInto(paneId) },
       { label: tx("화면 지우기"), shortcut: `${K}K`, onSelect: () => terms.clearPane(paneId) },
       "separator",
       { label: g && g.tabs.length > 1 ? tx("탭 닫기") : tx("칸 닫기"), shortcut: isMac ? "⌘W" : `${K}W`, danger: true, onSelect: () => closeTab(paneId) },
+    ];
+  };
+
+  /** 사이드바의 세션을 오른쪽 클릭했을 때 */
+  const sessionMenuItems = (s: Session): MenuItem[] => {
+    const isOpen = desks.allTabs(desk).some((t) => panes[t]?.sessionId === s.id);
+    return [
+      ...(isOpen ? ([{ label: tx("열린 탭으로 이동"), onSelect: () => showSession(s.id) }] as MenuItem[]) : []),
+      { label: tx("새 탭으로 추가"), onSelect: () => openTab(s.id) },
+      "separator",
+      { label: tx("편집"), onSelect: () => setEditing({ session: s }) },
     ];
   };
 
@@ -757,8 +781,9 @@ export function App() {
             sessions={sessions}
             connected={connected}
             selectedId={activeInfo?.sessionId ?? null}
-            onOpen={(s) => openTab(s.id)}
+            onOpen={(s) => showSession(s.id)}
             onEdit={(s) => setEditing({ session: s })}
+            onMenu={(s, x, y) => setMenu({ session: s, x, y, kind: "session" })}
             onNew={() => setEditing({ session: null })}
             onRenameGroup={async (from, to) => {
               try {
@@ -841,7 +866,13 @@ export function App() {
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          items={menu.kind === "tab" ? tabMenuItems(menu.paneId) : menuItems(menu.paneId)}
+          items={
+            menu.kind === "session"
+              ? sessionMenuItems(menu.session)
+              : menu.kind === "tab"
+                ? tabMenuItems(menu.paneId)
+                : menuItems(menu.paneId)
+          }
           onClose={() => setMenu(null)}
         />
       )}

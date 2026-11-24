@@ -144,8 +144,18 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
                 className={tcls}
                 title={p?.customTitle ? `${p.title} · ${p.sub}` : p?.sub}
                 onMouseDown={(e) => {
+                  // 가운데 버튼: 자동 스크롤이 시작되면 클릭이 오지 않으므로 막아 둔다.
+                  if (e.button === 1) return e.preventDefault();
                   if ((e.target as HTMLElement).closest(".close, input")) return;
                   props.onTabDragStart(e, t);
+                }}
+                onMouseUp={(e) => {
+                  // 가운데 버튼(휠) 클릭으로 닫기
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    props.onCloseTab(t);
+                  }
                 }}
                 onDoubleClick={(e) => {
                   if ((e.target as HTMLElement).closest(".close")) return;
@@ -156,13 +166,7 @@ function GroupView(props: Props & { group: Group; multi: boolean }) {
                   e.stopPropagation();
                   props.onTabMenu(t, e.clientX, e.clientY);
                 }}
-                onAuxClick={(e) => {
-                  // 가운데 버튼 클릭으로 닫기
-                  if (e.button === 1) {
-                    e.preventDefault();
-                    props.onCloseTab(t);
-                  }
-                }}
+                onAuxClick={(e) => e.button === 1 && e.preventDefault()}
               >
                 {props.renamingTab === t ? (
                   <span className="gtab-label">

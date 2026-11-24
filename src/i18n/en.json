@@ -543,5 +543,9 @@
  "확인하는 중…": "Checking…",
  "환경 색": "Environment color",
  "휠 클릭": "Middle-click",
- "흔한 단어나 연속된 글자(1234, abcd)를 빼세요.": "Remove common words and sequences (1234, abcd)."
+ "흔한 단어나 연속된 글자(1234, abcd)를 빼세요.": "Remove common words and sequences (1234, abcd).",
+ "{0} 연결 (열린 탭이 있으면 그 탭으로)": "Connect {0} (goes to its tab if already open)",
+ "열린 탭으로 이동": "Go to open tab",
+ "새 탭으로 추가": "Open in new tab",
+ "고른 글자가 있을 때": "with text selected"
 }

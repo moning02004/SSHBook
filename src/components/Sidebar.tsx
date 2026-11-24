@@ -10,12 +10,14 @@ interface Props {
   selectedId: string | null;
   onOpen: (s: Session) => void;
   onEdit: (s: Session) => void;
+  /** 세션을 오른쪽 클릭했을 때 */
+  onMenu: (s: Session, x: number, y: number) => void;
   onNew: () => void;
   /** 그룹 이름 바꾸기(빈 이름이면 그룹 없음으로) */
   onRenameGroup: (from: string, to: string) => void;
 }
 
-export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew, onRenameGroup }: Props) {
+export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMenu, onNew, onRenameGroup }: Props) {
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const sections = useMemo(() => groupSessions(filterSessions(sessions, query)), [sessions, query]);
@@ -68,8 +70,15 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onNew
               </div>
             )}
             {sec.sessions.map((s) => (
-              <div key={s.id} className={`session-row${s.id === selectedId ? " selected" : ""}${s.color ? ` env-row env-${s.color}` : ""}`}>
-                <button className="session" onClick={() => onOpen(s)} title={tx("{0} 연결", s.name)}>
+              <div
+                key={s.id}
+                className={`session-row${s.id === selectedId ? " selected" : ""}${s.color ? ` env-row env-${s.color}` : ""}`}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onMenu(s, e.clientX, e.clientY);
+                }}
+              >
+                <button className="session" onClick={() => onOpen(s)} title={tx("{0} 연결 (열린 탭이 있으면 그 탭으로)", s.name)}>
                   <span className={`dot${connected.has(s.id) ? " on" : ""}`} />
                   <span className="meta">
                     <span className="name">{s.name}</span>

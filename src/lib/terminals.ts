@@ -339,6 +339,12 @@ async function connect(entry: PaneEntry): Promise<string | null> {
   return fail(entry, tx("연결하지 못했습니다: 시도 횟수를 넘었습니다."));
 }
 
+const isMacPlatform = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
+
+/** Ctrl+C (맥은 ⌘C가 원래 복사라서 Ctrl+C는 늘 인터럽트로 둔다) */
+const isCopyKey = (e: KeyboardEvent) =>
+  !isMacPlatform && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.code === "KeyC";
+
 /** 앱 단축키(분할 등)는 xterm이 셸로 보내지 않도록 걸러낸다. */
 export function setShortcutFilter(fn: (e: KeyboardEvent) => boolean) {
   shortcutFilter = fn;
@@ -360,7 +366,19 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
   term.loadAddon(fit);
   const search = new SearchAddon({ highlightLimit: 2000 });
   term.loadAddon(search);
-  term.attachCustomKeyEventHandler((e) => !shortcutFilter(e));
+  term.attachCustomKeyEventHandler((e) => {
+    if (shortcutFilter(e)) return false;
+    // Ctrl+C: 고른 글자가 있으면 복사하고 셸로 보내지 않는다. 없으면 평소처럼 인터럽트(^C).
+    if (isCopyKey(e) && term.hasSelection()) {
+      if (e.type === "keydown") {
+        void navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+        term.clearSelection();
+      }
+      e.preventDefault();
+      return false;
+    }
+    return true;
+  });
   term.onSelectionChange(() => {
     const text = term.getSelection();
     if (text && getSettings().copyOnSelect) void navigator.clipboard.writeText(text).catch(() => {});
