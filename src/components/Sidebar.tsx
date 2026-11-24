@@ -17,9 +17,33 @@ interface Props {
   onRenameGroup: (from: string, to: string) => void;
 }
 
+const COLLAPSED_KEY = "sshbook.collapsedGroups";
+
+function loadCollapsed(): Set<string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
 export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMenu, onNew, onRenameGroup }: Props) {
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
+  // 접은 그룹. 다음에 켤 때도 그대로 둔다.
+  const [collapsed, setCollapsed] = useState(loadCollapsed);
+  const toggle = (title: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(title)) next.add(title);
+      try {
+        localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...next]));
+      } catch {
+        // 저장하지 못해도 이번 실행 동안은 접힌 채로 둔다.
+      }
+      return next;
+    });
   const sections = useMemo(() => groupSessions(filterSessions(sessions, query)), [sessions, query]);
 
   return (
@@ -36,7 +60,10 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
 
       <nav className="session-list" aria-label={tx("저장된 세션")}>
         {sessions.length === 0 && <p className="empty">{tx("저장된 세션이 없습니다. '새 세션'으로 SSH 서버를 추가하세요.")}</p>}
-        {sections.map((sec) => (
+        {sections.map((sec) => {
+          // 검색 중에는 찾은 세션이 가려지지 않게 모두 펼친다.
+          const folded = !!sec.title && !query.trim() && collapsed.has(sec.title);
+          return (
           <div key={sec.title ?? "_all"}>
             {sec.title && (
               <div className="section-title" onDoubleClick={() => sec.title !== UNGROUPED_LABEL && setRenaming(sec.title)}>
@@ -59,7 +86,16 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
                   />
                 ) : (
                   <>
-                    <span>{sec.title}</span> <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
+                    <button
+                      className="group-toggle"
+                      aria-expanded={!folded}
+                      title={folded ? tx("펼치기") : tx("접기")}
+                      onClick={() => sec.title && toggle(sec.title)}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                    >
+                      <span className="chevron" aria-hidden />
+                      <span>{sec.title}</span> <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
+                    </button>
                     {sec.title !== UNGROUPED_LABEL && (
                       <button className="icon-btn ghost xs group-edit" aria-label={tx("{0} 그룹 이름 바꾸기", sec.title)} title={tx("그룹 이름 바꾸기 (더블클릭)")} onClick={() => setRenaming(sec.title)}>
                         <IconEdit width={11} height={11} />
@@ -69,7 +105,7 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
                 )}
               </div>
             )}
-            {sec.sessions.map((s) => (
+            {!folded && sec.sessions.map((s) => (
               <div
                 key={s.id}
                 className={`session-row${s.id === selectedId ? " selected" : ""}${s.color ? ` env-row env-${s.color}` : ""}`}
@@ -91,7 +127,8 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
               </div>
             ))}
           </div>
-        ))}
+          );
+        })}
       </nav>
     </aside>
   );

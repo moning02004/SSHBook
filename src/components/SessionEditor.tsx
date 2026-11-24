@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { errorText, type SecretInput } from "../lib/api";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { api, errorText, type SecretInput } from "../lib/api";
 import { pickKeyFile } from "../lib/dialogs";
 import {
   COLOR_LABEL,
@@ -11,6 +11,8 @@ import {
   type ForwardKind,
   type Session,
 } from "../lib/sessions";
+import { ComboBox } from "./ComboBox";
+import { PasswordInput } from "./PasswordInput";
 import { Dropdown } from "./Dropdown";
 import { IconClose, IconPlus, IconTrash } from "./Icons";
 import { SideTabs } from "./SideTabs";
@@ -65,14 +67,27 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
   const jumpChoices = sessions.filter((x) => x.kind === "ssh" && x.id !== s.id);
   const [password, setPassword] = useState("");
   const [passphrase, setPassphrase] = useState("");
-  // "보관함에 저장" 하나로 비밀번호, 또는 키 파일 + 키 암호를 함께 다룬다.
-  const [store, setStore] = useState(() => {
-    if (!initial) return true;
-    if (initial.auth === "key") return !!initial.hasPrivateKey || !!initial.hasPassphrase;
-    return !!initial.hasPassword;
-  });
+  // "바로 접속" 하나로 비밀번호, 또는 키 파일 + 키 암호의 저장을 함께 다룬다. 기본은 켬.
+  // 끄면 보관함에서 지우고 연결할 때마다 터미널에서 로그인한다.
+  const [store, setStore] = useState(() => !initial?.askLogin);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // 저장된 비밀번호·키 암호는 칸에 미리 채워 둔다('보기'로 바로 확인할 수 있게).
+  useEffect(() => {
+    if (!initial || initial.kind !== "ssh") return;
+    let alive = true;
+    const load = (kind: "password" | "passphrase", fill: Dispatch<SetStateAction<string>>) =>
+      api
+        .sessionRevealSecret(initial.id, kind)
+        .then((v) => alive && v && fill((cur) => cur || v))
+        .catch((e) => alive && setError(errorText(e)));
+    if (initial.hasPassword) void load("password", setPassword);
+    if (initial.hasPassphrase) void load("passphrase", setPassphrase);
+    return () => {
+      alive = false;
+    };
+    // 창을 열 때 한 번만 불러온다.
+  }, []);
   const set = (patch: Partial<Session>) => setS((prev) => ({ ...prev, ...patch }));
   const isLocal = s.kind === "local";
   const auth = s.auth ?? "password";
@@ -106,8 +121,7 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
       if (useDir && !s.cwd?.trim()) return tx("시작 경로를 입력하거나 '연결 시 경로 지정'을 끄세요.");
     }
     if (where === "auth") {
-      if (!s.user?.trim()) return tx("사용자를 입력하세요.");
-      if (auth === "key" && !s.keyPath?.trim()) return tx("개인 키 파일을 고르세요.");
+      if (store && auth === "key" && !s.keyPath?.trim()) return tx("개인 키 파일을 고르세요.");
     }
     if (where === "network") {
       for (const f of forwards) {
@@ -117,16 +131,42 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
     }
     return null;
   };
+  // 새 세션에서 '다음'으로 가 본 가장 먼 항목. 거기까지는 왼쪽 목록으로 오갈 수 있다.
+  const [reached, setReached] = useState(0);
   const goStep = (to: number) => {
     setError("");
     focusPanel.current = true;
     pick(steps[to][0]);
-    focusPanel.current = true;
+    setReached((r) => Math.max(r, to));
   };
   const nextStep = () => {
     const problem = stepProblem(tab);
     if (problem) return setError(problem);
     goStep(step + 1);
+  };
+  /** 왼쪽 목록에서 항목을 눌렀을 때. 새 세션은 순서대로만 앞으로 갈 수 있다. */
+  const pickTab = (next: EditorTab): boolean => {
+    if (!isNew) {
+      pick(next);
+      return true;
+    }
+    const to = steps.findIndex(([id]) => id === next);
+    if (to > reached) {
+      setError(tx("지금 항목을 입력하고 '다음'을 누르세요."));
+      return false;
+    }
+    // 이미 지나온 항목이라도 앞으로 갈 때는 그 사이 항목을 다시 확인한다(돌아가서 지웠을 수 있다).
+    for (let i = step; i < to; i++) {
+      const problem = stepProblem(steps[i][0]);
+      if (problem) {
+        if (i !== step) pick(steps[i][0]);
+        setError(problem);
+        return false;
+      }
+    }
+    setError("");
+    pick(next);
+    return true;
   };
 
   /** 문제가 있는 칸이 있는 항목으로 옮겨서 알려 준다. */
@@ -140,9 +180,8 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
     const host = s.host?.trim() ?? "";
     const name = s.name.trim() || host;
     if (!isLocal && !host) return invalid("connect", tx("호스트를 입력하세요."));
-    if (!isLocal && !s.user?.trim()) return invalid("auth", tx("사용자를 입력하세요."));
     if (!name) return invalid("display", tx("이름을 입력하세요."));
-    if (!isLocal && auth === "key" && !s.keyPath?.trim()) return invalid("auth", tx("개인 키 파일을 고르세요."));
+    if (!isLocal && store && auth === "key" && !s.keyPath?.trim()) return invalid("auth", tx("개인 키 파일을 고르세요."));
     if (!isLocal && useDir && !s.cwd?.trim()) return invalid("connect", tx("시작 경로를 입력하거나 '연결 시 경로 지정'을 끄세요."));
     for (const f of isLocal ? [] : forwards) {
       const problem = forwardProblem(f);
@@ -150,17 +189,21 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
     }
 
     const secret: SecretInput = {};
-    if (isLocal || auth === "agent") {
+    if (isLocal || auth === "agent" || !store) {
       secret.clear = true;
     } else if (!store) {
       // 저장하지 않으면 지금까지 저장된 것도 지운다. 연결할 때 터미널에서 묻는다.
       secret.clear = true;
     } else if (auth === "password") {
+      // 비밀번호 칸은 저장된 값으로 미리 채워 두므로, 비웠다면 저장된 비밀번호도 지운다.
       if (password) secret.password = password;
+      else secret.clear = true;
     } else {
       const keyChanged = s.keyPath !== initial?.keyPath;
       secret.importKey = keyChanged || !initial?.hasPrivateKey;
+      // 키 암호 칸도 저장된 값으로 미리 채워 두므로, 비웠다면 저장된 키 암호를 지운다.
       if (passphrase) secret.passphrase = passphrase;
+      else secret.clearPassphrase = true;
     }
 
     setBusy(true);
@@ -171,15 +214,17 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
             cwd: useDir ? s.cwd?.trim() : undefined,
             forwards: forwards.map((f) => (f.kind === "dynamic" ? { kind: f.kind, bindPort: f.bindPort } : { ...f, host: f.host?.trim() })),
             jumpId: s.jumpId || null,
+            askLogin: !store,
+            // 바로 접속을 끄면 사용자와 비밀번호를 연결할 때 터미널에서 받는다.
+            ...(store ? {} : { user: undefined, auth: "password" as AuthMethod }),
           };
-      await onSave({ ...s, ...extra, name, host: host || s.host, user: s.user?.trim(), group: s.group?.trim() || null }, secret);
+      await onSave({ ...s, user: s.user?.trim(), ...extra, name, host: host || s.host, group: s.group?.trim() || null }, secret);
     } catch (e) {
       setError(errorText(e));
       setBusy(false);
     }
   };
 
-  const savedHint = (has?: boolean) => (has ? tx("저장됨 · 바꿀 때만 입력") : "");
 
   return (
     <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -205,7 +250,8 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
           <SideTabs
             tabs={isLocal ? LOCAL_TABS : SSH_TABS}
             active={tab}
-            onPick={pick}
+            onPick={pickTab}
+            isLocked={(id) => isNew && steps.findIndex(([t]) => t === id) > reached}
             idPrefix="se-tab"
             panelId="se-panel"
             label={tx("세션 설정 항목")}
@@ -221,18 +267,13 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                   <section className="form-section">
                     <h3>{tx("표시")}</h3>
                     <div className="grid2">
+                      <div className="field">
+                        <span className="field-label">{tx("그룹")}</span>
+                        <ComboBox value={s.group ?? ""} options={groups} onChange={(group) => set({ group })} placeholder={tx("그룹 없음")} ariaLabel={tx("그룹")} />
+                      </div>
                       <label className="field">
                         <span>{tx("이름")}</span>
                         <input className="input" autoFocus={isLocal && !navigated.current} value={s.name} onChange={(e) => set({ name: e.target.value })} placeholder={s.host?.trim() || tx("비우면 호스트 이름")} />
-                      </label>
-                      <label className="field">
-                        <span>{tx("그룹")}</span>
-                        <input className="input" list="group-list" value={s.group ?? ""} onChange={(e) => set({ group: e.target.value })} placeholder={tx("그룹 없음")} />
-                        <datalist id="group-list">
-                          {groups.map((g) => (
-                            <option key={g} value={g} />
-                          ))}
-                        </datalist>
                       </label>
                     </div>
                   </section>
@@ -291,25 +332,43 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
               {tab === "auth" && (
                 <>
                   <section className="form-section">
+                    <label className="check">
+                      <input type="checkbox" checked={store} onChange={(e) => setStore(e.target.checked)} />
+                      <span>
+                        {tx("바로 접속")}
+                        <span className="hint">
+                          {store
+                            ? auth === "agent"
+                              ? tx("SSH 에이전트의 키로 묻지 않고 연결합니다.")
+                              : auth === "key"
+                              ? tx("키 파일과 키 암호를 보관함에 저장해 묻지 않고 연결합니다. 보관함 파일만 옮기면 다른 PC에서도 이 키로 연결됩니다.")
+                              : tx("비밀번호를 보관함에 암호화해 저장하고, 연결할 때 묻지 않습니다. 비워 두면 처음 연결할 때 묻습니다.")
+                            : tx("아무것도 저장하지 않고, 연결할 때마다 터미널에서 사용자와 비밀번호를 입력합니다.")}
+                        </span>
+                      </span>
+                    </label>
+                  </section>
+                  {/* 바로 접속을 끄면 아래는 모두 막는다. 값은 남겨 두었다가 다시 켜면 돌아온다. */}
+                  <fieldset className="form-section plain-fieldset" disabled={!store}>
                     <h3>{tx("인증")}</h3>
                     <label className="field">
                       <span>{tx("사용자")}</span>
-                      <input className="input mono" value={s.user ?? ""} onChange={(e) => set({ user: e.target.value })} placeholder="deploy" />
+                      <input className="input mono" value={store ? (s.user ?? "") : ""} onChange={(e) => set({ user: e.target.value })} placeholder={store ? tx("비워 두면 연결할 때 묻기") : tx("연결할 때 터미널에서 입력")} />
                     </label>
                     <div className="seg" role="group" aria-label={tx("인증 방식")}>
                       {(["password", "key", "agent"] as AuthMethod[]).map((a) => (
-                        <button key={a} aria-pressed={auth === a} onClick={() => set({ auth: a })}>
+                        <button key={a} aria-pressed={(store ? auth : "password") === a} onClick={() => set({ auth: a })}>
                           {AUTH_LABEL[a]}
                         </button>
                       ))}
                     </div>
-                    {auth === "password" && (
+                    {(!store || auth === "password") && (
                       <label className="field">
                         <span>{tx("비밀번호")}</span>
-                        <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={savedHint(initial?.hasPassword)} />
+                        <PasswordInput value={store ? password : ""} onChange={setPassword} disabled={!store} placeholder={store ? tx("비워 두면 저장하지 않고, 연결할 때 묻습니다") : tx("연결할 때 터미널에서 입력")} />
                       </label>
                     )}
-                    {auth === "key" && (
+                    {store && auth === "key" && (
                       <>
                         <div className="field">
                           <label className="field-label" htmlFor="keyfile">{tx("개인 키 파일")}</label>
@@ -322,28 +381,14 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                         </div>
                         <label className="field">
                           <span>{tx("키 암호 (없으면 비워 두기)")}</span>
-                          <input className="input" type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={savedHint(initial?.hasPassphrase)} />
+                          <PasswordInput value={store ? passphrase : ""} onChange={setPassphrase} disabled={!store} placeholder={store ? tx("비워 두면 저장하지 않습니다") : tx("연결할 때 터미널에서 입력")} />
                         </label>
                       </>
                     )}
-                    {auth === "agent" ? (
+                    {store && auth === "agent" && (
                       <p className="hint">{tx("OS의 SSH 에이전트(macOS ssh-agent, Windows OpenSSH 에이전트)에 올라간 키를 씁니다. 보관함에는 아무것도 저장하지 않습니다.")}</p>
-                    ) : (
-                      <label className="check">
-                        <input type="checkbox" checked={store} onChange={(e) => setStore(e.target.checked)} />
-                        <span>
-                          {auth === "password" ? tx("비밀번호를 보관함에 저장") : tx("키 파일과 키 암호를 보관함에 저장")}
-                          <span className="hint">
-                            {store
-                              ? auth === "key"
-                                ? tx("보관함 파일만 옮기면 다른 PC에서도 이 키로 연결됩니다.")
-                                : tx("마스터 비밀번호로 암호화해서 저장합니다.")
-                              : tx("연결할 때마다 터미널에서 묻습니다.")}
-                          </span>
-                        </span>
-                      </label>
                     )}
-                  </section>
+                  </fieldset>
                 </>
               )}
               {tab === "display" && (
@@ -351,18 +396,13 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                   <section className="form-section">
                     <h3>{tx("표시")}</h3>
                     <div className="grid2">
+                      <div className="field">
+                        <span className="field-label">{tx("그룹")}</span>
+                        <ComboBox value={s.group ?? ""} options={groups} onChange={(group) => set({ group })} placeholder={tx("그룹 없음")} ariaLabel={tx("그룹")} />
+                      </div>
                       <label className="field">
                         <span>{tx("이름")}</span>
                         <input className="input" autoFocus={isLocal} value={s.name} onChange={(e) => set({ name: e.target.value })} placeholder={s.host?.trim() || tx("비우면 호스트 이름")} />
-                      </label>
-                      <label className="field">
-                        <span>{tx("그룹")}</span>
-                        <input className="input" list="group-list" value={s.group ?? ""} onChange={(e) => set({ group: e.target.value })} placeholder={tx("그룹 없음")} />
-                        <datalist id="group-list">
-                          {groups.map((g) => (
-                            <option key={g} value={g} />
-                          ))}
-                        </datalist>
                       </label>
                     </div>
                     <div className="field">

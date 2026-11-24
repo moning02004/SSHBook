@@ -55,6 +55,8 @@ export interface Session {
   forwards?: Forward[];
   /** 터미널 출력을 시각과 함께 파일로 남긴다 */
   logOutput?: boolean;
+  /** 바로 접속을 끈 세션: 비밀번호를 저장하지 않고 연결할 때마다 묻는다 */
+  askLogin?: boolean;
   // 보관함에 비밀 정보가 있는지 여부만 받는다. 내용은 프론트엔드로 넘어오지 않는다.
   hasPassword?: boolean;
   hasPrivateKey?: boolean;

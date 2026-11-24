@@ -57,7 +57,7 @@ test("새 세션은 단계별로 입력하고 저장하면 바로 연결한다",
   await dialog.getByPlaceholder("10.0.1.21 또는 example.com").fill("e2e.internal");
   await dialog.getByRole("button", { name: "다음" }).click();
   await expect(dialog.getByRole("tab", { name: "인증" })).toHaveAttribute("aria-selected", "true");
-  await dialog.getByPlaceholder("deploy").fill("tester");
+  await dialog.getByRole("textbox", { name: "사용자", exact: true }).fill("tester");
   await page.keyboard.press("Enter");
   await expect(dialog.getByRole("tab", { name: "표시" })).toHaveAttribute("aria-selected", "true");
   await dialog.getByRole("button", { name: "다음" }).click();
@@ -71,8 +71,192 @@ test("새 세션은 단계별로 입력하고 저장하면 바로 연결한다",
   await expect(terminal(page)).toContainText("비밀번호");
   await page.keyboard.type("test-only");
   await page.keyboard.press("Enter");
+  // 저장된 비밀번호가 없었으므로 저장할지 묻는다.
+  await expect(terminal(page)).toContainText("이 비밀번호를 보관함에 저장할까요?");
+  await page.keyboard.type("y");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("✓ 비밀번호를 보관함에 저장했습니다.");
   await expect(terminal(page)).toContainText("e2e.internal $");
   await expect(terminal(page)).not.toContainText("test-only");
+});
+
+test("새 세션은 왼쪽 항목도 순서대로만 넘어가고, 지나온 항목으로는 돌아갈 수 있다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "새 세션" }).click();
+  const dialog = page.locator(".session-editor");
+  const tab = (name: string) => dialog.getByRole("tab", { name });
+
+  await expect(tab("인증")).toHaveAttribute("aria-disabled", "true");
+  await tab("인증").click({ force: true });
+  await expect(dialog.getByRole("alert")).toHaveText("지금 항목을 입력하고 '다음'을 누르세요.");
+  await expect(tab("연결")).toHaveAttribute("aria-selected", "true");
+
+  const host = dialog.getByPlaceholder("10.0.1.21 또는 example.com");
+  await host.fill("e2e.internal");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await dialog.getByRole("textbox", { name: "사용자", exact: true }).fill("tester");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await expect(tab("표시")).toHaveAttribute("aria-selected", "true");
+
+  // 지나온 항목으로는 자유롭게 간다.
+  await tab("연결").click();
+  await expect(tab("연결")).toHaveAttribute("aria-selected", "true");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  // 돌아가서 필수 칸을 지우면 앞으로 건너뛸 수 없다.
+  await host.fill("");
+  await tab("표시").click();
+  await expect(dialog.getByRole("alert")).toHaveText("호스트를 입력하세요.");
+  await expect(tab("연결")).toHaveAttribute("aria-selected", "true");
+  await host.fill("e2e.internal");
+  await tab("표시").click();
+  await expect(tab("표시")).toHaveAttribute("aria-selected", "true");
+  // 아직 안 간 항목은 막힌다.
+  await tab("기록").click({ force: true });
+  await expect(dialog.getByRole("alert")).toHaveText("지금 항목을 입력하고 '다음'을 누르세요.");
+});
+
+test("그룹은 목록에서 고르거나 새로 쓰고, 왼쪽에서 접고 펼친다", async ({ page }) => {
+  await createVault(page);
+  const editor = page.locator(".session-editor");
+  const setGroup = async (name: string, group: string, pick: boolean) => {
+    await page.getByRole("button", { name: `${name} 편집` }).click();
+    await editor.getByRole("tab", { name: "표시" }).click();
+    const field = editor.getByRole("combobox", { name: "그룹" });
+    if (pick) {
+      await field.click();
+      await page.getByRole("option", { name: group }).click();
+    } else {
+      await field.fill(group);
+    }
+    await expect(field).toHaveValue(group);
+    await editor.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(editor).toHaveCount(0);
+  };
+  await setGroup("dev-box", "개발", false);
+  await setGroup("localhost", "개발", true);
+
+  const toggle = page.locator(".group-toggle", { hasText: "개발" });
+  const row = page.locator(".session-row", { hasText: "dev-box" });
+  await expect(row).toBeVisible();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(row).toHaveCount(0);
+  // 검색하면 접힌 그룹도 보인다.
+  await page.getByPlaceholder("세션 검색").fill("dev");
+  await expect(row).toBeVisible();
+  await page.getByPlaceholder("세션 검색").fill("");
+  await expect(row).toHaveCount(0);
+  await toggle.click();
+  await expect(row).toBeVisible();
+});
+
+test("저장된 비밀번호가 틀려 다시 입력해 붙으면 그 값으로 바꾸고, 편집 창에서 볼 수 있다", async ({ page }) => {
+  await createVault(page);
+  await page.getByTitle("dev-box").first().click();
+  await expect(terminal(page)).toContainText("처음 연결하는 서버");
+  await page.keyboard.type("yes");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("비밀번호가 맞지 않습니다.");
+  await page.keyboard.type("fresh-pw");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("✓ 보관함의 비밀번호를 새로 입력한 값으로 업데이트했습니다.");
+  await expect(terminal(page)).toContainText("dev-box $");
+
+  await page.getByRole("button", { name: "dev-box 편집" }).click();
+  const editor = page.locator(".session-editor");
+  await editor.getByRole("tab", { name: "인증" }).click();
+  const field = editor.locator(".password-input input");
+  await expect(field).toHaveAttribute("type", "password");
+  await expect(field).toHaveValue("fresh-pw");
+  await editor.getByRole("button", { name: "보기" }).click();
+  await expect(field).toHaveAttribute("type", "text");
+  await expect(field).toHaveValue("fresh-pw");
+  await editor.getByRole("button", { name: "숨기기" }).click();
+  await expect(field).toHaveAttribute("type", "password");
+});
+
+test("사용자 없이 저장한 세션은 연결할 때 사용자와 비밀번호를 묻는다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "새 세션" }).click();
+  const dialog = page.locator(".session-editor");
+  await dialog.getByPlaceholder("10.0.1.21 또는 example.com").fill("nouser.internal");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  // 사용자를 비워도 넘어간다.
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await expect(dialog.getByRole("tab", { name: "표시" })).toHaveAttribute("aria-selected", "true");
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await dialog.getByRole("button", { name: "다음" }).click();
+  await dialog.getByRole("button", { name: "저장하고 연결" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await expect(terminal(page)).toContainText("처음 연결하는 서버");
+  await page.keyboard.type("yes");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("사용자 (ESC로 취소)");
+  await page.keyboard.type("alice");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("alice");
+  await expect(terminal(page)).toContainText("비밀번호 (ESC로 취소)");
+  await page.keyboard.type("test-only");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("이 비밀번호를 보관함에 저장할까요?");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("nouser.internal $");
+});
+
+test("바로 접속을 끄면 비밀번호를 지우고, 연결할 때마다 묻기만 한다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "dev-box 편집" }).click();
+  const editor = page.locator(".session-editor");
+  await editor.getByRole("tab", { name: "인증" }).click();
+  const quick = editor.getByRole("checkbox", { name: /바로 접속/ });
+  await expect(quick).toBeChecked();
+  const pw = editor.locator(".password-input input");
+  await expect(pw).toBeEnabled();
+  await quick.uncheck();
+  // 끄면 아래 인증 항목을 모두 막고 비워 보인다.
+  await expect(pw).toBeDisabled();
+  await expect(pw).toHaveValue("");
+  const user = editor.getByRole("textbox", { name: "사용자", exact: true });
+  await expect(user).toBeDisabled();
+  await expect(user).toHaveValue("");
+  await expect(editor.getByRole("button", { name: "키 파일" })).toBeDisabled();
+  await editor.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+
+  await page.getByTitle("dev-box").first().click();
+  await page.keyboard.type("yes");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("사용자 (ESC로 취소)");
+  await page.keyboard.type("dev");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("비밀번호 (ESC로 취소)");
+  await expect(terminal(page)).not.toContainText("비밀번호가 맞지 않습니다.");
+  await page.keyboard.type("any-pw");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("dev-box $");
+  await expect(terminal(page)).not.toContainText("비밀번호를 보관함에 저장");
+
+  // 다시 열면 체크가 꺼져 있고 비밀번호 칸은 비어 있다.
+  await page.getByRole("button", { name: "dev-box 편집" }).click();
+  await editor.getByRole("tab", { name: "인증" }).click();
+  await expect(quick).not.toBeChecked();
+  await expect(editor.locator(".password-input input")).toHaveValue("");
+});
+
+test("비밀번호 칸을 비우고 저장하면 저장된 비밀번호를 지운다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "dev-box 편집" }).click();
+  const editor = page.locator(".session-editor");
+  await editor.getByRole("tab", { name: "인증" }).click();
+  const field = editor.locator(".password-input input");
+  await expect(field).toHaveValue("old-wrong");
+  await field.fill("");
+  await editor.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await page.getByRole("button", { name: "dev-box 편집" }).click();
+  await editor.getByRole("tab", { name: "인증" }).click();
+  await expect(field).toHaveValue("");
 });
 
 test("호스트 키 확인은 ESC로 취소한다", async ({ page }) => {
@@ -167,11 +351,19 @@ test("영어 화면에는 한글이 남지 않는다", async ({ page }) => {
   }
   await page.locator(".settings-dialog").getByRole("button", { name: "Close", exact: true }).last().click();
 
+  // 새 세션은 순서대로만 넘어가므로 필수 칸을 채우며 '다음'으로 모든 항목을 본다.
   await page.getByRole("button", { name: "New session" }).click();
-  for (const tab of await page.locator(".session-editor").getByRole("tab").all()) {
-    await tab.click();
-    expect(await korean(), await tab.innerText()).toEqual([]);
+  const editor = page.locator(".session-editor");
+  await editor.getByRole("button", { name: "Next" }).click();
+  expect(await korean(), "connect error").toEqual([]);
+  for (const value of ["e2e.internal", "tester", "", "", ""]) {
+    const current = await editor.getByRole("tab", { selected: true }).innerText();
+    expect(await korean(), current).toEqual([]);
+    if (value) await editor.locator("#se-panel input:not([type=checkbox])").first().fill(value);
+    const next = editor.getByRole("button", { name: "Next" });
+    if (await next.count()) await next.click();
   }
+  await expect(editor.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
   await page.locator(".session-editor").getByRole("button", { name: "Cancel" }).click();
 
   await page.getByTitle("prod-web-01").first().click();

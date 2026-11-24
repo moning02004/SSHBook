@@ -246,6 +246,9 @@ struct SecretInput {
     import_key: bool,
     #[serde(default)]
     clear: bool,
+    /// 키 암호만 지운다(키 칸을 비우고 저장한 경우)
+    #[serde(default)]
+    clear_passphrase: bool,
 }
 
 fn with_flags(mut s: Session, secrets: &std::collections::BTreeMap<String, Secret>) -> Session {
@@ -274,10 +277,9 @@ fn session_save(state: State<'_, AppState>, session: Session, secret: Option<Sec
     if s.name.trim().is_empty() {
         return Err("이름을 입력하세요.".into());
     }
-    if s.kind == SessionKind::Ssh
-        && (s.host.as_deref().unwrap_or("").trim().is_empty() || s.user.as_deref().unwrap_or("").trim().is_empty())
-    {
-        return Err("호스트와 사용자를 입력하세요.".into());
+    // 사용자는 비워 둘 수 있다. 그러면 연결할 때 터미널에서 묻는다.
+    if s.kind == SessionKind::Ssh && s.host.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("호스트를 입력하세요.".into());
     }
     if let Some(problem) = s.forwards.iter().find_map(|f| f.problem()) {
         return Err(problem.into());
@@ -297,6 +299,11 @@ fn session_save(state: State<'_, AppState>, session: Session, secret: Option<Sec
         }
         if let Some(p) = input.password.take().filter(|p| !p.is_empty()) {
             entry.password = Some(p);
+        }
+        if input.clear_passphrase {
+            if let Some(mut old) = entry.passphrase.take() {
+                old.zeroize();
+            }
         }
         if let Some(p) = input.passphrase.take().filter(|p| !p.is_empty()) {
             entry.passphrase = Some(p);
@@ -365,6 +372,96 @@ fn sessions_rename_group(state: State<'_, AppState>, from: String, to: String) -
         v.save().map_err(|e| e.to_string())?;
     }
     Ok(n)
+}
+
+/// 다시 입력한 비밀번호·키 암호로 접속에 성공했을 때 보관함에 반영한다.
+/// 저장해 둔 값이 있으면 바꾸고, 없으면 `add`일 때만 새로 넣는다.
+/// 돌려주는 값: "updated"(바꿈·넣음) · "unchanged"(같은 값) · "none"(저장된 값이 없어 넣지 않음)
+fn replace_stored_secret(
+    secrets: &mut std::collections::BTreeMap<String, Secret>,
+    id: &str,
+    password: Option<String>,
+    passphrase: Option<String>,
+    add: bool,
+) -> &'static str {
+    let had = secrets.get(id);
+    let had_any = |pick: fn(&Secret) -> bool| had.is_some_and(pick);
+    let has_pw = had_any(|s| s.password.is_some());
+    let has_pp = had_any(|s| s.passphrase.is_some());
+    let mut result = "none";
+    for (is_pw, new) in [(true, password), (false, passphrase)] {
+        let Some(mut new) = new.filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let stored = if is_pw { has_pw } else { has_pp };
+        if !stored && !add {
+            new.zeroize();
+            continue;
+        }
+        let entry = secrets.entry(id.to_string()).or_default();
+        let slot = if is_pw {
+            &mut entry.password
+        } else {
+            &mut entry.passphrase
+        };
+        match slot.as_mut() {
+            Some(old) if *old == new => {
+                new.zeroize();
+                if result == "none" {
+                    result = "unchanged";
+                }
+            }
+            Some(old) => {
+                // 예전 값은 메모리에서 지우고 바꾼다.
+                old.zeroize();
+                *old = std::mem::take(&mut new);
+                result = "updated";
+            }
+            None => {
+                *slot = Some(std::mem::take(&mut new));
+                result = "updated";
+            }
+        }
+    }
+    result
+}
+
+/// 편집 창의 '보기'용. 보관함이 열려 있을 때만 저장된 비밀번호·키 암호를 돌려준다.
+#[tauri::command]
+fn session_reveal_secret(state: State<'_, AppState>, id: String, kind: String) -> CmdResult<Option<String>> {
+    let guard = lock(&state.vault);
+    let v = guard.as_ref().ok_or(LOCKED)?;
+    let Some(sec) = v.data.secrets.get(&id) else {
+        return Ok(None);
+    };
+    match kind.as_str() {
+        "password" => Ok(sec.password.clone()),
+        "passphrase" => Ok(sec.passphrase.clone()),
+        _ => Err("알 수 없는 항목입니다.".into()),
+    }
+}
+
+#[tauri::command]
+fn session_update_secret(
+    state: State<'_, AppState>,
+    id: String,
+    password: Option<String>,
+    passphrase: Option<String>,
+    add: Option<bool>,
+) -> CmdResult<String> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    match v.data.sessions.iter().find(|s| s.id == id) {
+        None => return Ok("none".into()),
+        // 바로 접속을 끈 세션은 저장하지도, 저장할지 묻지도 않는다.
+        Some(s) if s.ask_login => return Ok("skip".into()),
+        Some(_) => {}
+    }
+    let result = replace_stored_secret(&mut v.data.secrets, &id, password, passphrase, add.unwrap_or(false));
+    if result == "updated" {
+        v.save().map_err(|e| e.to_string())?;
+    }
+    Ok(result.into())
 }
 
 /// 같은 설정(저장된 비밀번호·키 포함)으로 새 세션을 만든다. 이름 뒤에 "복사"를 붙인다.
@@ -442,17 +539,30 @@ enum Plan {
 }
 
 /// 세션 하나의 SSH 접속 정보와 인증 수단을 보관함에서 꺼낸다.
+/// `typed_user`: 세션에 사용자가 비어 있어 터미널에서 물어본 값. `None`이면 사용자를 물어보라고 돌려준다.
+/// 점프 호스트처럼 물어볼 수 없는 경우는 `ask_user`를 끈다.
 fn target_for(
     v: &OpenVault,
     s: &Session,
     password: Option<String>,
     passphrase: Option<String>,
+    typed_user: Option<String>,
+    ask_user: bool,
 ) -> CmdResult<ssh::Target> {
     let host = s.host.clone().unwrap_or_default().trim().to_string();
-    let user = s.user.clone().unwrap_or_default().trim().to_string();
-    if host.is_empty() || user.is_empty() {
-        return Err(format!("'{}': 호스트와 사용자를 입력하세요.", s.name));
+    let saved_user = s.user.clone().unwrap_or_default().trim().to_string();
+    if host.is_empty() {
+        return Err(format!("'{}': 호스트를 입력하세요.", s.name));
     }
+    let user = if !saved_user.is_empty() {
+        saved_user
+    } else if let Some(u) = typed_user.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+        u
+    } else if ask_user {
+        return Err(ssh::ask("user", "").into_message());
+    } else {
+        return Err(format!("'{}': 사용자를 입력하세요.", s.name));
+    };
     let port = s.port.unwrap_or(22);
     let sec = v.data.secrets.get(&s.id);
     let z = |o: Option<String>| o.filter(|x| !x.is_empty()).map(Zeroizing::new);
@@ -497,6 +607,7 @@ fn plan_for(
     session_id: Option<String>,
     password: Option<String>,
     passphrase: Option<String>,
+    user: Option<String>,
 ) -> CmdResult<Plan> {
     let Some(sid) = session_id else {
         return Ok(Plan::Local { shell: None, cwd: None });
@@ -511,13 +622,13 @@ fn plan_for(
             cwd: s.cwd.clone(),
         });
     }
-    let target = target_for(v, s, password, passphrase)?;
+    let target = target_for(v, s, password, passphrase, user, true)?;
     let jump = match s.jump_id.as_deref().filter(|j| !j.is_empty()) {
         Some(jid) => {
             let j = find(jid)
                 .filter(|j| j.kind == SessionKind::Ssh && j.id != s.id)
                 .ok_or("거쳐 갈 서버(점프 호스트) 세션을 찾을 수 없습니다. 세션 편집에서 다시 고르세요.")?;
-            Some(target_for(v, j, None, None)?)
+            Some(target_for(v, j, None, None, None, false)?)
         }
         None => None,
     };
@@ -576,12 +687,17 @@ async fn term_open(
     rows: u16,
     password: Option<String>,
     passphrase: Option<String>,
+    user: Option<String>,
     prompt_key: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let generation = state.lock_generation.load(Ordering::SeqCst);
-    let plan = plan_for(&app, &state, session_id, password, passphrase)
-        .inspect_err(|e| applog::warn(&format!("연결 준비 실패: {e}")))?;
+    let plan = plan_for(&app, &state, session_id, password, passphrase, user).inspect_err(|e| {
+        // 사용자를 묻는 것은 정상 흐름이라 남기지 않는다.
+        if !e.starts_with("ask:") {
+            applog::warn(&format!("연결 준비 실패: {e}"))
+        }
+    })?;
     let term = match plan {
         Plan::Local { shell, cwd } => Term::Local(pty::spawn(app, id.clone(), shell, cwd, cols, rows)?),
         Plan::Ssh { mut connect, log } => {
@@ -1030,6 +1146,8 @@ pub fn run() {
             vault_import,
             sessions_list,
             session_save,
+            session_update_secret,
+            session_reveal_secret,
             session_delete,
             session_duplicate,
             sessions_rename_group,
@@ -1061,4 +1179,48 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("앱을 시작하지 못했습니다");
+}
+
+#[cfg(test)]
+mod secret_update_tests {
+    use super::*;
+
+    #[test]
+    fn replaces_only_values_that_were_stored() {
+        let mut secrets = std::collections::BTreeMap::new();
+        let mut sec = Secret::default();
+        sec.password = Some("old".into());
+        secrets.insert("a".to_string(), sec);
+        // 저장하지 않은 세션에는 묻기 전에는 넣지 않는다.
+        assert_eq!(
+            replace_stored_secret(&mut secrets, "b", Some("x".into()), None, false),
+            "none"
+        );
+        assert!(!secrets.contains_key("b"));
+        assert_eq!(
+            replace_stored_secret(&mut secrets, "b", Some("x".into()), None, true),
+            "updated"
+        );
+        assert_eq!(secrets["b"].password.as_deref(), Some("x"));
+        // 저장한 적 없는 키 암호는 넣지 않는다.
+        assert_eq!(
+            replace_stored_secret(&mut secrets, "a", None, Some("pp".into()), false),
+            "none"
+        );
+        assert_eq!(secrets["a"].passphrase, None);
+        // 같은 값이나 빈 값은 바꾸지 않는다.
+        assert_eq!(
+            replace_stored_secret(&mut secrets, "a", Some("old".into()), None, false),
+            "unchanged"
+        );
+        assert_eq!(
+            replace_stored_secret(&mut secrets, "a", Some(String::new()), None, false),
+            "none"
+        );
+        assert_eq!(
+            replace_stored_secret(&mut secrets, "a", Some("new".into()), None, false),
+            "updated"
+        );
+        assert_eq!(secrets["a"].password.as_deref(), Some("new"));
+    }
 }

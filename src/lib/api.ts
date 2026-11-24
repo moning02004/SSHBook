@@ -71,6 +71,8 @@ export interface SecretInput {
   importKey?: boolean;
   /** true면 해당 세션의 비밀 정보를 지운다 */
   clear?: boolean;
+  /** true면 키 암호만 지운다 */
+  clearPassphrase?: boolean;
 }
 
 export interface TermData {
@@ -84,6 +86,8 @@ export interface TermExit {
 
 /** 저장된 값이 없거나 틀렸을 때 터미널에서 다시 물어본 값. 저장하지 않는다. */
 export interface OpenOptions {
+  /** 세션에 사용자가 비어 있을 때 터미널에서 물어본 값 */
+  user?: string;
   password?: string;
   passphrase?: string;
   /** 접속 중 서버가 묻는 OTP 같은 질문을 이 창으로 돌려받기 위한 표시 */
@@ -118,7 +122,7 @@ export interface HostKeyPrompt {
 }
 
 export interface AskPrompt {
-  kind: "password" | "passphrase";
+  kind: "user" | "password" | "passphrase";
   message: string;
 }
 
@@ -136,6 +140,8 @@ export function parseOpenError(e: unknown): { hostKey: HostKeyPrompt } | { ask: 
   }
   return { text: s };
 }
+
+export type SecretUpdate = "updated" | "unchanged" | "none" | "skip";
 
 export interface Backend {
   vaultStatus(): Promise<VaultStatus>;
@@ -161,6 +167,13 @@ export interface Backend {
   sessionDelete(id: string): Promise<void>;
   /** 같은 설정(저장된 비밀번호·키 포함)으로 "이름 복사" 세션을 만든다 */
   sessionDuplicate(id: string): Promise<Session>;
+  /**
+   * 다시 입력한 비밀번호·키 암호로 붙었을 때 보관함에 반영한다. 저장된 값이 있으면 바꾸고, 없으면 add일 때만 넣는다.
+   * updated: 바꿈·넣음 · unchanged: 같은 값 · none: 저장된 값이 없어 넣지 않음 · skip: 바로 접속을 끈 세션
+   */
+  sessionUpdateSecret(id: string, secret: { password?: string; passphrase?: string }, add?: boolean): Promise<SecretUpdate>;
+  /** 편집 창의 '보기'용. 보관함에 저장된 비밀번호나 키 암호(없으면 null) */
+  sessionRevealSecret(id: string, kind: "password" | "passphrase"): Promise<string | null>;
   /** 그룹 이름 바꾸기(빈 이름이면 그룹 없음으로). 바뀐 세션 수 */
   sessionsRenameGroup(from: string, to: string): Promise<number>;
   snippetsList(): Promise<Snippet[]>;
@@ -218,6 +231,9 @@ const tauriBackend: Backend = {
   sessionSave: (session, secret) => invoke("session_save", { session, secret: secret ?? null }),
   sessionDelete: (id) => invoke("session_delete", { id }),
   sessionDuplicate: (id) => invoke("session_duplicate", { id }),
+  sessionRevealSecret: (id, kind) => invoke("session_reveal_secret", { id, kind }),
+  sessionUpdateSecret: (id, secret, add) =>
+    invoke("session_update_secret", { id, password: secret.password ?? null, passphrase: secret.passphrase ?? null, add: add ?? false }),
   sessionsRenameGroup: (from, to) => invoke("sessions_rename_group", { from, to }),
   snippetsList: () => invoke("snippets_list"),
   snippetSave: (snippet) => invoke("snippet_save", { snippet }),
@@ -233,7 +249,7 @@ const tauriBackend: Backend = {
   sftpRemove: (id, path, isDir) => invoke("sftp_remove", { id, path, isDir }),
   sftpRename: (id, from, to) => invoke("sftp_rename", { id, from, to }),
   termOpen: (sessionId, cols, rows, opts) =>
-    invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null, promptKey: opts?.promptKey ?? null }),
+    invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null, user: opts?.user ?? null, promptKey: opts?.promptKey ?? null }),
   termAuthAnswer: (id, answers) => invoke("term_auth_answer", { id, answers }),
   onAuthPrompt: (cb) => listen<AuthPrompt>("term-auth-prompt", (e) => cb(e.payload)),
   sshConfigHosts: () => invoke("ssh_config_hosts"),
@@ -291,6 +307,8 @@ function createMockBackend(): Backend {
     }
     return "/" + parts.join("/");
   };
+  // 미리보기: 보관함에 저장된 비밀번호(dev-box는 틀린 값이 들어 있다)
+  const storedPasswords: Record<string, string> = { m3: "old-wrong" };
   let sessions: Session[] = [
     { id: "m1", name: "localhost", group: null, kind: "local", shell: "zsh" },
     { id: "m2", name: "prod-web-01", group: null, kind: "ssh", host: "10.0.1.21", port: 22, user: "deploy", auth: "key", hasPrivateKey: true },
@@ -364,12 +382,26 @@ function createMockBackend(): Backend {
     async sessionsList() {
       return sessions;
     },
-    async sessionSave(session) {
+    async sessionSave(session, secret) {
       const saved = { ...session, id: session.id || `m${Date.now()}` };
+      if (secret?.clear) delete storedPasswords[saved.id];
+      if (secret?.password) storedPasswords[saved.id] = secret.password;
+      saved.hasPassword = storedPasswords[saved.id] !== undefined;
       sessions = sessions.some((s) => s.id === saved.id)
         ? sessions.map((s) => (s.id === saved.id ? saved : s))
         : [...sessions, saved];
       return saved;
+    },
+    async sessionRevealSecret(id, kind) {
+      return kind === "password" ? (storedPasswords[id] ?? null) : null;
+    },
+    async sessionUpdateSecret(id, secret, add) {
+      if (sessions.find((s) => s.id === id)?.askLogin) return "skip";
+      if (!secret.password) return "none";
+      if (storedPasswords[id] === secret.password) return "unchanged";
+      if (storedPasswords[id] === undefined && !add) return "none";
+      storedPasswords[id] = secret.password;
+      return "updated";
     },
     async sessionDelete(id) {
       sessions = sessions.filter((s) => s.id !== id).map((s) => (s.jumpId === id ? { ...s, jumpId: null } : s));
@@ -453,8 +485,11 @@ function createMockBackend(): Backend {
         pendingTrust = s.id;
         throw `hostkey:${JSON.stringify({ kind: "unknown", hostId: `${s.host}:${s.port ?? 22}`, algorithm: "ssh-ed25519", fingerprint: "SHA256:mOcKpReViEw0nLy4bRoWsEr+xYz1234567890abc" })}`;
       }
+      if (s?.kind === "ssh" && !s.user?.trim() && !opts?.user) throw `ask:${JSON.stringify({ kind: "user", message: "" })}`;
+      // 미리보기: 'test-only'만 맞는 비밀번호다. 다시 물어본 값은 무엇이든 맞는 것으로 친다.
       if (s?.kind === "ssh" && s.auth === "password" && !opts?.password) {
-        throw `ask:${JSON.stringify({ kind: "password", message: "" })}`;
+        const stored = storedPasswords[s.id];
+        if (stored !== "test-only") throw `ask:${JSON.stringify({ kind: "password", message: stored ? "비밀번호가 맞지 않습니다." : "" })}`;
       }
       const id = `t${++seq}`;
       if (s?.kind === "ssh") {

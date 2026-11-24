@@ -161,6 +161,7 @@ function bind(id: string, entry: PaneEntry) {
 
 const DIM = "\x1b[2m";
 const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
 const RESET = "\x1b[0m";
 
 /** 터미널 안에서 한 줄을 입력받는다. hidden이면 글자를 보여 주지 않는다. Ctrl+C·Esc는 취소(null). */
@@ -286,6 +287,7 @@ async function connect(entry: PaneEntry): Promise<string | null> {
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
       const id = await openCancellable(entry, opts);
+      const retyped = { password: opts.password, passphrase: opts.passphrase };
       // 다시 물어본 비밀번호는 더 들고 있지 않는다.
       opts.password = undefined;
       opts.passphrase = undefined;
@@ -294,6 +296,33 @@ async function connect(entry: PaneEntry): Promise<string | null> {
         return null;
       }
       if (!id) return fail(entry, tx("연결을 취소했습니다."));
+      // 다시 입력한 값으로 붙었으면 보관함에 반영한다. 저장된 값이 틀렸으면 바로 바꾸고,
+      // 저장된 값이 없으면 저장할지 묻는다. 셸 출력은 bind 전까지 모아 두었다가 뒤에 보여 준다.
+      if (entry.sessionId && (retyped.password || retyped.passphrase)) {
+        const sid = entry.sessionId;
+        const replaced = await api.sessionUpdateSecret(sid, retyped).catch(() => "none" as const);
+        let added = false;
+        if (replaced === "none" && entries.get(entry.paneId) === entry) {
+          const q = retyped.password
+            ? tx("이 비밀번호를 보관함에 저장할까요? 다음부터 묻지 않고 연결합니다. (y/N) ")
+            : tx("이 키 암호를 보관함에 저장할까요? 다음부터 묻지 않고 연결합니다. (y/N) ");
+          const yes = (await readLine(entry, q, false, true))?.trim().toLowerCase();
+          if (yes === "y" || yes === "yes") added = (await api.sessionUpdateSecret(sid, retyped, true).catch(() => "none")) === "updated";
+        }
+        if (entries.get(entry.paneId) !== entry) {
+          void api.termClose(id).catch(() => {});
+          return null;
+        }
+        const pw = !!retyped.password;
+        const note =
+          replaced === "updated"
+            ? pw ? tx("✓ 보관함의 비밀번호를 새로 입력한 값으로 업데이트했습니다.") : tx("✓ 보관함의 키 암호를 새로 입력한 값으로 업데이트했습니다.")
+            : added
+              ? pw ? tx("✓ 비밀번호를 보관함에 저장했습니다.") : tx("✓ 키 암호를 보관함에 저장했습니다.")
+              : "";
+        if (note) term.write(`${GREEN}${note}${RESET}\r\n`);
+        retyped.password = retyped.passphrase = undefined;
+      }
       bind(id, entry);
       return id;
     } catch (err) {
@@ -327,10 +356,12 @@ async function connect(entry: PaneEntry): Promise<string | null> {
       }
       if ("ask" in r) {
         if (r.ask.message) term.write(`${RED}${r.ask.message}${RESET}\r\n`);
-        const v = await readLine(entry, r.ask.kind === "password" ? tx("비밀번호 (ESC로 취소): ") : tx("개인 키 암호 (ESC로 취소): "), true);
+        const isUser = r.ask.kind === "user";
+        const label = isUser ? tx("사용자 (ESC로 취소): ") : r.ask.kind === "password" ? tx("비밀번호 (ESC로 취소): ") : tx("개인 키 암호 (ESC로 취소): ");
+        const v = await readLine(entry, label, !isUser);
         if (entries.get(entry.paneId) !== entry) return null;
         if (v === null) return fail(entry, tx("연결을 취소했습니다."));
-        opts[r.ask.kind] = v;
+        opts[r.ask.kind] = isUser ? v.trim() : v;
         continue;
       }
       return fail(entry, tx("연결하지 못했습니다: {0}", r.text));

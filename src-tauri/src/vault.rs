@@ -159,6 +159,9 @@ pub struct Session {
     /// 켜면 터미널 출력을 시각과 함께 파일로 남긴다
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub log_output: bool,
+    /// 바로 접속을 끈 세션: 비밀번호·키 암호를 저장하지 않고 연결할 때마다 묻는다(저장할지도 묻지 않는다).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ask_login: bool,
     // 아래는 화면 표시용. 프론트엔드에서 온 값은 무시하고, 목록을 돌려줄 때만 채운다.
     #[serde(default, skip_deserializing)]
     pub has_password: bool,
@@ -623,6 +626,7 @@ mod tests {
             jump_id: None,
             forwards: vec![],
             log_output: false,
+            ask_login: false,
             has_password: false,
             has_private_key: false,
             has_passphrase: false,

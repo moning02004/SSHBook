@@ -127,6 +127,9 @@ button:disabled { cursor: default; opacity: 0.6; }
   background: var(--card); box-shadow: var(--raise); outline: none;
 }
 .input::placeholder { color: var(--off); }
+.plain-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.plain-fieldset:disabled .seg { opacity: 0.55; }
+.input:disabled { background: var(--soft); box-shadow: none; color: var(--muted); cursor: not-allowed; }
 .input:focus { border-color: var(--accent); box-shadow: var(--raise), var(--ring); }
 .input.mono { font-family: var(--mono); }
 .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 0; }
@@ -156,7 +159,7 @@ button:disabled { cursor: default; opacity: 0.6; }
 .search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--text); }
 .search input::placeholder { color: var(--off); }
 .session-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 3px; margin: 0 -6px; padding: 2px 6px 6px; }
-.section-title { display: flex; gap: 6px; padding: 10px 8px 4px; font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; }
+.section-title { display: flex; gap: 6px; padding: 10px 8px 4px; font-size: 11.5px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; }
 .session-row { display: flex; align-items: center; border: 1px solid transparent; border-radius: 10px; transition: box-shadow 0.12s, background 0.12s; }
 .session-row:hover { background: var(--card); border-color: var(--line-soft); box-shadow: var(--raise); }
 .session-row.selected, .session-row.selected:hover { background: var(--card); border-color: var(--line); box-shadow: var(--raise-2); }
@@ -227,7 +230,7 @@ body.resizing .term-slot { pointer-events: none; }
 .dialog.wide { max-width: 600px; }
 .session-editor .dialog-body { gap: 0; padding-top: 2px; padding-bottom: 16px; }
 .form-section { display: flex; flex-direction: column; gap: 12px; padding: 16px 0; }
-.form-section + .form-section { border-top: 1px solid var(--line-soft); }
+.form-section + .form-section, .form-section + .plain-fieldset { border-top: 1px solid var(--line-soft); }
 .form-section h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
 .session-editor .check .hint { display: block; margin-top: 2px; }
 .form-error { flex: none; padding: 8px 20px; border-top: 1px solid var(--line-soft); }
@@ -237,6 +240,16 @@ body.resizing .term-slot { pointer-events: none; }
 .dropdown::after { content: ""; position: absolute; top: 50%; right: 13px; width: 6px; height: 6px; margin-top: -5px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); transition: transform 0.12s, margin-top 0.12s; }
 .dropdown[aria-expanded="true"] { border-color: var(--accent); box-shadow: var(--raise), var(--ring); }
 .dropdown[aria-expanded="true"]::after { margin-top: -2px; transform: rotate(225deg); }
+.password-input { position: relative; }
+.password-input .input { padding-right: 40px; }
+.password-toggle { position: absolute; top: 50%; right: 5px; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; transform: translateY(-50%); border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.password-toggle:disabled { opacity: 0.4; cursor: default; background: transparent; }
+.password-toggle:hover { color: var(--text); background: var(--line-soft); }
+.combo { position: relative; }
+.combo .input { padding-right: 34px; }
+.combo-toggle { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 30px; border: 0; border-radius: 0 9px 9px 0; background: transparent; cursor: pointer; }
+.combo-toggle::after { content: ""; position: absolute; top: 50%; right: 13px; width: 6px; height: 6px; margin-top: -5px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); transition: transform 0.12s, margin-top 0.12s; }
+.combo-toggle[aria-expanded="true"]::after { margin-top: -2px; transform: rotate(225deg); }
 .dropdown-value { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dropdown-menu { position: fixed; z-index: 55; min-width: 120px; padding: 4px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: var(--pop); }
 .dropdown-option { position: relative; padding: 7px 28px 7px 10px; border-radius: 7px; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
@@ -252,6 +265,8 @@ body.resizing .term-slot { pointer-events: none; }
 .settings-nav { flex: none; width: 168px; display: flex; flex-direction: column; gap: 2px; padding: 12px 8px; overflow-y: auto; border-right: 1px solid var(--line-soft); background: var(--soft); }
 .settings-nav button { flex: none; height: 34px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 500; text-align: left; cursor: pointer; }
 .settings-nav button:hover { color: var(--text); background: var(--line-soft); }
+.settings-nav button[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+.settings-nav button[aria-disabled="true"]:hover { color: var(--muted); background: transparent; }
 .settings-nav button[aria-selected="true"] { color: var(--accent-text); background: var(--card); border-color: var(--line); }
 .settings-panel { flex: 1; min-width: 0; }
 .settings-nav button { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -496,6 +511,10 @@ body.dragging-tab .term-slot { pointer-events: none; }
 
 
 .section-title { align-items: center; }
+.group-toggle { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; cursor: pointer; }
+.group-toggle:hover { color: var(--text); }
+.group-toggle .chevron { flex: none; width: 5px; height: 5px; margin: 0 2px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translate(-1px, -1px); transition: transform 0.12s; }
+.group-toggle[aria-expanded="false"] .chevron { transform: rotate(-45deg); }
 .section-title .group-edit { opacity: 0; margin-left: 2px; }
 .section-title:hover .group-edit, .section-title .group-edit:focus-visible { opacity: 1; }
 .group-rename { flex: 1; min-width: 0; height: 22px; padding: 0 6px; border: 1px solid var(--accent); border-radius: 6px; background: var(--card); color: var(--text); font: inherit; font-size: 11px; font-weight: 700; outline: none; }

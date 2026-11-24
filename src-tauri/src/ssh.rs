@@ -131,7 +131,7 @@ pub struct HostKeyPrompt {
 
 #[derive(Serialize)]
 pub struct AskPrompt {
-    /// "password" | "passphrase"
+    /// "user" | "password" | "passphrase"
     pub kind: &'static str,
     pub message: String,
 }
@@ -156,7 +156,7 @@ fn other(prefix: &str, e: impl std::fmt::Display) -> OpenError {
     OpenError::Other(format!("{prefix}: {e}"))
 }
 
-fn ask(kind: &'static str, message: &str) -> OpenError {
+pub(crate) fn ask(kind: &'static str, message: &str) -> OpenError {
     OpenError::Ask(AskPrompt {
         kind,
         message: message.into(),
