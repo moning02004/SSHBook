@@ -102,7 +102,7 @@ export function Sidebar({ sessions, groups, connected, selectedId, onOpen, onEdi
                       onDoubleClick={(e) => e.stopPropagation()}
                     >
                       <span className="chevron" aria-hidden />
-                      <span>{sec.title}</span> <span className="group-n">{sec.sessions.length}</span>
+                      <span>{sec.title}</span> <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
                     </button>
                     {sec.title !== UNGROUPED_LABEL && (
                       <button className="icon-btn ghost xs group-edit" aria-label={tx("{0} 그룹 이름 바꾸기", sec.title)} title={tx("그룹 이름 바꾸기 (더블클릭)")} onClick={() => setRenaming(sec.title)}>
