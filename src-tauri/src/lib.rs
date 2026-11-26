@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter, Manager, State};
-use vault::{KdfParams, OpenVault, Secret, Session, SessionKind, Snippet};
+use vault::{Group, KdfParams, OpenVault, Secret, Session, SessionKind, Snippet};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 type CmdResult<T> = Result<T, String>;
@@ -355,22 +355,45 @@ fn session_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
 /// 그룹 이름을 바꾼다(그 그룹의 세션 모두). to가 비면 그룹을 없앤다(그룹 없음으로).
 #[tauri::command]
 fn sessions_rename_group(state: State<'_, AppState>, from: String, to: String) -> CmdResult<usize> {
-    let to = to.trim().to_string();
     let mut guard = lock(&state.vault);
     let v = guard.as_mut().ok_or(LOCKED)?;
-    let mut n = 0;
-    for s in v
-        .data
-        .sessions
-        .iter_mut()
-        .filter(|s| s.group.as_deref() == Some(from.as_str()))
-    {
-        s.group = (!to.is_empty()).then(|| to.clone());
-        n += 1;
-    }
-    if n > 0 {
-        v.save().map_err(|e| e.to_string())?;
-    }
+    let n = v.data.group_rename(&from, &to)?;
+    v.save().map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+// ---- 그룹 ----
+
+#[tauri::command]
+fn groups_list(state: State<'_, AppState>) -> CmdResult<Vec<Group>> {
+    let guard = lock(&state.vault);
+    Ok(guard.as_ref().ok_or(LOCKED)?.data.group_list())
+}
+
+#[tauri::command]
+fn group_add(state: State<'_, AppState>, name: String, color: Option<String>) -> CmdResult<Group> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let g = v.data.group_add(&name, color)?;
+    v.save().map_err(|e| e.to_string())?;
+    Ok(g)
+}
+
+#[tauri::command]
+fn group_set_color(state: State<'_, AppState>, name: String, color: Option<String>) -> CmdResult<()> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    v.data.group_set_color(&name, color)?;
+    v.save().map_err(|e| e.to_string())
+}
+
+/// 그룹을 지운다. 그 그룹의 세션은 그룹 없음으로 옮긴다.
+#[tauri::command]
+fn group_delete(state: State<'_, AppState>, name: String) -> CmdResult<usize> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let n = v.data.group_delete(&name);
+    v.save().map_err(|e| e.to_string())?;
     Ok(n)
 }
 
@@ -1151,6 +1174,10 @@ pub fn run() {
             session_delete,
             session_duplicate,
             sessions_rename_group,
+            groups_list,
+            group_add,
+            group_set_color,
+            group_delete,
             snippets_list,
             snippet_save,
             snippet_delete,

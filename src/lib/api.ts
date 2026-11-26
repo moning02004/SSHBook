@@ -4,7 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Session, Snippet } from "./sessions";
+import type { Group, Session, SessionColor, Snippet } from "./sessions";
 import { translateBackend, tx, type Language } from "./i18n";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -176,6 +176,12 @@ export interface Backend {
   sessionRevealSecret(id: string, kind: "password" | "passphrase"): Promise<string | null>;
   /** 그룹 이름 바꾸기(빈 이름이면 그룹 없음으로). 바뀐 세션 수 */
   sessionsRenameGroup(from: string, to: string): Promise<number>;
+  /** 미리 만든 그룹 + 세션에 적힌 그룹 */
+  groupsList(): Promise<Group[]>;
+  groupAdd(name: string, color: SessionColor | null): Promise<Group>;
+  groupSetColor(name: string, color: SessionColor | null): Promise<void>;
+  /** 그룹을 지운다. 그 그룹의 세션은 그룹 없음으로. 옮긴 세션 수 */
+  groupDelete(name: string): Promise<number>;
   snippetsList(): Promise<Snippet[]>;
   snippetSave(s: Snippet): Promise<Snippet>;
   snippetDelete(id: string): Promise<void>;
@@ -235,6 +241,10 @@ const tauriBackend: Backend = {
   sessionUpdateSecret: (id, secret, add) =>
     invoke("session_update_secret", { id, password: secret.password ?? null, passphrase: secret.passphrase ?? null, add: add ?? false }),
   sessionsRenameGroup: (from, to) => invoke("sessions_rename_group", { from, to }),
+  groupsList: () => invoke("groups_list"),
+  groupAdd: (name, color) => invoke("group_add", { name, color }),
+  groupSetColor: (name, color) => invoke("group_set_color", { name, color }),
+  groupDelete: (name) => invoke("group_delete", { name }),
   snippetsList: () => invoke("snippets_list"),
   snippetSave: (snippet) => invoke("snippet_save", { snippet }),
   snippetDelete: (id) => invoke("snippet_delete", { id }),
@@ -271,6 +281,7 @@ function createMockBackend(): Backend {
   let exists = false;
   let unlocked = false;
   let passwordless = false;
+  let groups: Group[] = [];
   let snippets: Snippet[] = [
     { id: "s1", name: "도커 로그", command: "docker compose logs -f --tail=200 api" },
     { id: "s2", name: "디스크 사용량", command: "df -h" },
@@ -414,8 +425,33 @@ function createMockBackend(): Backend {
       return copy;
     },
     async sessionsRenameGroup(from, to) {
+      const name = to.trim();
       let n = 0;
-      sessions = sessions.map((s) => (s.group === from ? (n++, { ...s, group: to.trim() || null }) : s));
+      sessions = sessions.map((s) => (s.group === from ? (n++, { ...s, group: name || null }) : s));
+      if (!name || groups.some((g) => g.name === name)) groups = groups.filter((g) => g.name !== from);
+      else groups = groups.map((g) => (g.name === from ? { ...g, name } : g));
+      return n;
+    },
+    async groupsList() {
+      const used = sessions.map((s) => s.group?.trim()).filter((g): g is string => !!g);
+      return [...groups, ...[...new Set(used)].filter((g) => !groups.some((x) => x.name === g)).map((name) => ({ name, color: null }))];
+    },
+    async groupAdd(name, color) {
+      const n = name.trim();
+      if (!n) throw "그룹 이름을 입력하세요.";
+      if (groups.some((g) => g.name === n) || sessions.some((s) => s.group?.trim() === n)) throw "같은 이름의 그룹이 있습니다.";
+      const g = { name: n, color };
+      groups = [...groups, g];
+      return g;
+    },
+    async groupSetColor(name, color) {
+      if (groups.some((g) => g.name === name)) groups = groups.map((g) => (g.name === name ? { ...g, color } : g));
+      else groups = [...groups, { name, color }];
+    },
+    async groupDelete(name) {
+      groups = groups.filter((g) => g.name !== name);
+      let n = 0;
+      sessions = sessions.map((s) => (s.group === name ? (n++, { ...s, group: null }) : s));
       return n;
     },
     async snippetsList() {

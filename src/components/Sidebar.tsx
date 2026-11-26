@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
-import { describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Session } from "../lib/sessions";
+import { describeSession, filterSessions, groupSessions, UNGROUPED_LABEL, type Group, type Session } from "../lib/sessions";
 import { IconEdit, IconPlus, IconSearch } from "./Icons";
 import { tx } from "../lib/i18n";
 
 interface Props {
   sessions: Session[];
+  /** 미리 만든 그룹과 그룹 색(설정 → 그룹) */
+  groups: Group[];
   connected: Set<string>;
   /** 지금 보고 있는 창의 세션 */
   selectedId: string | null;
@@ -28,7 +30,7 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMenu, onNew, onRenameGroup }: Props) {
+export function Sidebar({ sessions, groups, connected, selectedId, onOpen, onEdit, onMenu, onNew, onRenameGroup }: Props) {
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   // 접은 그룹. 다음에 켤 때도 그대로 둔다.
@@ -44,7 +46,12 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
       }
       return next;
     });
-  const sections = useMemo(() => groupSessions(filterSessions(sessions, query)), [sessions, query]);
+  // 검색할 때는 찾은 세션이 있는 그룹만 보인다.
+  const sections = useMemo(
+    () => groupSessions(filterSessions(sessions, query), query.trim() ? [] : groups.map((g) => g.name)),
+    [sessions, groups, query],
+  );
+  const colorOf = useMemo(() => new Map(groups.map((g) => [g.name, g.color ?? null])), [groups]);
 
   return (
     <aside className="sidebar">
@@ -63,8 +70,9 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
         {sections.map((sec) => {
           // 검색 중에는 찾은 세션이 가려지지 않게 모두 펼친다.
           const folded = !!sec.title && !query.trim() && collapsed.has(sec.title);
+          const color = sec.title ? colorOf.get(sec.title) : null;
           return (
-          <div key={sec.title ?? "_all"}>
+          <div key={sec.title ?? "_all"} className={color ? `group-colored env-${color}` : undefined}>
             {sec.title && (
               <div className="section-title" onDoubleClick={() => sec.title !== UNGROUPED_LABEL && setRenaming(sec.title)}>
                 {renaming === sec.title ? (
@@ -94,7 +102,7 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
                       onDoubleClick={(e) => e.stopPropagation()}
                     >
                       <span className="chevron" aria-hidden />
-                      <span>{sec.title}</span> <span style={{ fontWeight: 400 }}>{sec.sessions.length}</span>
+                      <span>{sec.title}</span> <span className="group-n">{sec.sessions.length}</span>
                     </button>
                     {sec.title !== UNGROUPED_LABEL && (
                       <button className="icon-btn ghost xs group-edit" aria-label={tx("{0} 그룹 이름 바꾸기", sec.title)} title={tx("그룹 이름 바꾸기 (더블클릭)")} onClick={() => setRenaming(sec.title)}>
@@ -105,7 +113,10 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
                 )}
               </div>
             )}
-            {!folded && sec.sessions.map((s) => (
+            {!folded && (
+            <div className={sec.title ? "group-items" : undefined}>
+            {sec.sessions.length === 0 && <p className="group-empty">{tx("세션이 없습니다.")}</p>}
+            {sec.sessions.map((s) => (
               <div
                 key={s.id}
                 className={`session-row${s.id === selectedId ? " selected" : ""}${s.color ? ` env-row env-${s.color}` : ""}`}
@@ -126,6 +137,8 @@ export function Sidebar({ sessions, connected, selectedId, onOpen, onEdit, onMen
                 </button>
               </div>
             ))}
+            </div>
+            )}
           </div>
           );
         })}

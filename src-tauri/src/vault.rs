@@ -220,6 +220,19 @@ pub struct Snippet {
     pub command: String,
 }
 
+/// 세션 그룹. 세션이 하나도 없어도 미리 만들어 둘 수 있고, 색을 정할 수 있다.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    pub name: String,
+    /// red / orange / yellow / green / blue / purple. 없으면 색 없음
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+pub const GROUP_COLORS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
+const GROUP_NAME_MAX: usize = 60;
+
 #[derive(Serialize, Deserialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
 pub struct Secret {
@@ -250,6 +263,106 @@ pub struct VaultData {
     pub known_hosts: BTreeMap<String, String>,
     #[serde(default)]
     pub snippets: Vec<Snippet>,
+    /// 미리 만든 그룹과 그룹 색. 세션에만 적힌 그룹은 여기 없을 수도 있다.
+    #[serde(default)]
+    pub groups: Vec<Group>,
+}
+
+fn check_group_name(name: &str) -> std::result::Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("그룹 이름을 입력하세요.".into());
+    }
+    if name.chars().count() > GROUP_NAME_MAX {
+        return Err("그룹 이름이 너무 깁니다.".into());
+    }
+    Ok(name.to_string())
+}
+
+fn check_group_color(color: Option<String>) -> std::result::Result<Option<String>, String> {
+    match color {
+        Some(c) if !GROUP_COLORS.contains(&c.as_str()) => Err("알 수 없는 색입니다.".into()),
+        c => Ok(c),
+    }
+}
+
+impl VaultData {
+    /// 미리 만든 그룹 + 세션에만 적힌 그룹(색 없음). 정렬은 화면에서 한다.
+    pub fn group_list(&self) -> Vec<Group> {
+        let mut out = self.groups.clone();
+        for g in self.sessions.iter().filter_map(|s| s.group.as_deref()) {
+            let g = g.trim();
+            if !g.is_empty() && !out.iter().any(|x| x.name == g) {
+                out.push(Group {
+                    name: g.to_string(),
+                    color: None,
+                });
+            }
+        }
+        out
+    }
+
+    /// 그룹을 만든다. 같은 이름이 이미 있으면 거절한다.
+    pub fn group_add(&mut self, name: &str, color: Option<String>) -> std::result::Result<Group, String> {
+        let name = check_group_name(name)?;
+        let color = check_group_color(color)?;
+        if self.group_list().iter().any(|g| g.name == name) {
+            return Err("같은 이름의 그룹이 있습니다.".into());
+        }
+        let g = Group { name, color };
+        self.groups.push(g.clone());
+        Ok(g)
+    }
+
+    /// 그룹 색을 바꾼다. 세션에만 적혀 있던 그룹이면 이때 목록에 넣는다.
+    pub fn group_set_color(&mut self, name: &str, color: Option<String>) -> std::result::Result<(), String> {
+        let color = check_group_color(color)?;
+        if let Some(g) = self.groups.iter_mut().find(|g| g.name == name) {
+            g.color = color;
+        } else if self.sessions.iter().any(|s| s.group.as_deref() == Some(name)) {
+            self.groups.push(Group {
+                name: name.to_string(),
+                color,
+            });
+        } else {
+            return Err("그룹을 찾지 못했습니다.".into());
+        }
+        Ok(())
+    }
+
+    /// 그룹 이름을 바꾼다(그 그룹의 세션 모두). to가 비면 그룹을 지운다(세션은 그룹 없음으로).
+    /// 이미 있는 그룹 이름으로 바꾸면 두 그룹을 합치고 색은 받는 쪽 것을 쓴다. 옮긴 세션 수를 돌려준다.
+    pub fn group_rename(&mut self, from: &str, to: &str) -> std::result::Result<usize, String> {
+        if to.trim().is_empty() {
+            return Ok(self.group_delete(from));
+        }
+        let to = check_group_name(to)?;
+        let mut n = 0;
+        for s in self.sessions.iter_mut().filter(|s| s.group.as_deref() == Some(from)) {
+            s.group = Some(to.clone());
+            n += 1;
+        }
+        let target_exists = self.groups.iter().any(|g| g.name == to);
+        if let Some(i) = self.groups.iter().position(|g| g.name == from) {
+            if target_exists {
+                self.groups.remove(i);
+            } else {
+                self.groups[i].name = to;
+            }
+        }
+        Ok(n)
+    }
+
+    /// 그룹을 지운다. 그 그룹의 세션은 그룹 없음으로 옮긴다. 옮긴 세션 수를 돌려준다.
+    pub fn group_delete(&mut self, name: &str) -> usize {
+        self.groups.retain(|g| g.name != name);
+        let mut n = 0;
+        for s in self.sessions.iter_mut().filter(|s| s.group.as_deref() == Some(name)) {
+            s.group = None;
+            n += 1;
+        }
+        n
+    }
 }
 
 // ---- 열린 보관함 ----
@@ -631,6 +744,53 @@ mod tests {
             has_private_key: false,
             has_passphrase: false,
         }
+    }
+
+    #[test]
+    fn groups_can_be_empty_colored_renamed_and_deleted() {
+        let mut d = VaultData::default();
+        d.sessions.push(sample_session("s1")); // 그룹 "운영"
+                                               // 세션에만 적힌 그룹도 목록에 나온다(색 없음).
+        assert_eq!(
+            d.group_list(),
+            vec![Group {
+                name: "운영".into(),
+                color: None
+            }]
+        );
+
+        // 세션 없는 그룹을 미리 만든다.
+        d.group_add(" 개발 ", Some("green".into())).unwrap();
+        assert!(d.group_add("개발", None).is_err());
+        assert!(d.group_add("운영", None).is_err());
+        assert!(d.group_add("  ", None).is_err());
+        assert!(d.group_add("x", Some("pink".into())).is_err());
+        assert_eq!(d.group_list().len(), 2);
+
+        // 세션에만 있던 그룹에 색을 주면 목록에 들어간다.
+        d.group_set_color("운영", Some("red".into())).unwrap();
+        assert!(d
+            .groups
+            .iter()
+            .any(|g| g.name == "운영" && g.color.as_deref() == Some("red")));
+        assert!(d.group_set_color("없는 그룹", None).is_err());
+
+        // 이름을 바꾸면 세션도 따라간다. 이미 있는 이름이면 합치고 받는 쪽 색을 쓴다.
+        assert_eq!(d.group_rename("운영", "prod").unwrap(), 1);
+        assert_eq!(d.sessions[0].group.as_deref(), Some("prod"));
+        assert_eq!(d.group_rename("prod", "개발").unwrap(), 1);
+        assert_eq!(
+            d.group_list(),
+            vec![Group {
+                name: "개발".into(),
+                color: Some("green".into())
+            }]
+        );
+
+        // 지우면 세션은 그룹 없음으로 간다.
+        assert_eq!(d.group_delete("개발"), 1);
+        assert_eq!(d.sessions[0].group, None);
+        assert!(d.group_list().is_empty());
     }
 
     #[test]

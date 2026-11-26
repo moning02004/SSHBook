@@ -13,11 +13,12 @@ import {
   AUTO_LOCK_CHOICES,
   type CursorStyle,
 } from "../lib/settings";
-import type { Session } from "../lib/sessions";
+import type { Group, Session } from "../lib/sessions";
 import type { ThemeName } from "../lib/theme";
 import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { Dropdown } from "./Dropdown";
+import { GroupSettings } from "./GroupSettings";
 import { IconClose, IconExport, IconUnlock } from "./Icons";
 import { ImportSshConfigDialog } from "./ImportSshConfigDialog";
 import { KnownHostsDialog } from "./KnownHostsDialog";
@@ -47,6 +48,10 @@ interface Props {
   onLock: () => void;
   /** 지금 세션 목록(가져오기에서 중복을 가린다) */
   sessions: Session[];
+  /** 미리 만든 그룹과 그룹 색 */
+  groups: Group[];
+  /** 그룹을 바꾼 뒤 세션과 그룹 목록을 다시 읽는다 */
+  onGroupsChanged: () => Promise<void>;
   onClose: () => void;
 }
 
@@ -81,11 +86,12 @@ const SHORTCUTS: [string, string][] = [
 
 const CUSTOM = "__custom__";
 
-type SettingsTab = "appearance" | "terminal" | "security" | "shortcuts" | "import" | "logs" | "update";
+type SettingsTab = "appearance" | "terminal" | "groups" | "security" | "shortcuts" | "import" | "logs" | "update";
 
 const TABS: [SettingsTab, string][] = [
   ["appearance", tx("화면")],
   ["terminal", tx("터미널")],
+  ["groups", tx("그룹")],
   ["security", tx("보안")],
   ["shortcuts", tx("단축키")],
   ["import", tx("가져오기")],
@@ -97,7 +103,7 @@ const TABS: [SettingsTab, string][] = [
 let lastTab: SettingsTab = "appearance";
 
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
-export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, sessions, onClose }: Props) {
+export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, sessions, groups, onGroupsChanged, onClose }: Props) {
   useEscape(onClose);
   const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | "sshconfig" | null>(null);
   const s = useSettings();
@@ -256,6 +262,7 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
               </section>
             </>
           )}
+          {tab === "groups" && <GroupSettings groups={groups} sessions={sessions} onChanged={onGroupsChanged} onNotice={onNotice} />}
           {tab === "security" && (
             <>
               <section className="settings-section">

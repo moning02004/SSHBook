@@ -26,4 +26,14 @@ describe("groupSessions", () => {
     const r = groupSessions([s("web", "운영")]);
     expect(r.map((x) => x.title)).toEqual(["운영"]);
   });
+
+  it("미리 만든 그룹은 세션이 없어도 빈 묶음으로 보인다", () => {
+    const r = groupSessions([s("local"), s("web", "운영")], ["개발", "운영", " "]);
+    expect(r.map((x) => [x.title, x.sessions.length])).toEqual([
+      ["개발", 0],
+      ["운영", 1],
+      [UNGROUPED_LABEL, 1],
+    ]);
+    expect(groupSessions([], ["개발"]).map((x) => x.title)).toEqual(["개발"]);
+  });
 });

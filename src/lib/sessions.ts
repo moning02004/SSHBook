@@ -16,6 +16,12 @@ export const COLOR_LABEL: Record<SessionColor, string> = {
   purple: tx("보라"),
 };
 
+/** 세션 그룹. 세션 없이 미리 만들 수 있고 색을 정할 수 있다(설정 → 그룹). */
+export interface Group {
+  name: string;
+  color?: SessionColor | null;
+}
+
 export type ForwardKind = "local" | "remote" | "dynamic";
 
 /** 포트 포워딩 하나. dynamic(SOCKS)은 host/port를 쓰지 않는다. */
@@ -82,9 +88,10 @@ const byName = (a: Session, b: Session) => a.name.localeCompare(b.name, "ko");
  * 그룹을 하나도 쓰지 않으면 제목 없는 목록 하나를 돌려준다.
  * 그룹이 하나라도 있으면 그룹별 묶음을 만들고, 그룹 없는 세션은 맨 아래 "그룹 없음"으로 모은다.
  */
-export function groupSessions(list: Session[]): SessionSection[] {
-  if (list.length === 0) return [];
-  const names = [...new Set(list.map(groupOf).filter((g): g is string => g !== null))].sort((a, b) =>
+export function groupSessions(list: Session[], extraGroups: string[] = []): SessionSection[] {
+  const extra = extraGroups.map((g) => g.trim()).filter(Boolean);
+  if (list.length === 0 && extra.length === 0) return [];
+  const names = [...new Set([...list.map(groupOf).filter((g): g is string => g !== null), ...extra])].sort((a, b) =>
     a.localeCompare(b, "ko"),
   );
   if (names.length === 0) return [{ title: null, sessions: [...list].sort(byName) }];

@@ -466,3 +466,29 @@ test("Ctrl+C는 고른 글자가 있으면 복사한다", async ({ page, context
   // 복사한 뒤에는 선택이 풀려서, 다음 Ctrl+C는 셸로 간다.
   await expect(page.locator(".xterm-selection div")).toHaveCount(0);
 });
+
+test("설정에서 만든 빈 그룹은 사이드바에 '세션이 없습니다.'로 보이고 색을 바꿀 수 있다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "그룹" }).click();
+  await page.getByLabel("새 그룹 이름").fill("스테이징");
+  await page.getByRole("button", { name: "그룹 만들기" }).click();
+  await expect(page.getByLabel("스테이징 그룹 이름", { exact: true })).toHaveValue("스테이징");
+
+  const group = page.locator(".session-list > div", { hasText: "스테이징" });
+  await expect(group.locator(".group-empty")).toHaveText("세션이 없습니다.");
+  // 새 그룹은 아직 안 쓴 첫 색(빨강)을 받는다. 다른 색으로 바꾸면 사이드바도 바뀐다.
+  await expect(group).toHaveClass(/env-red/);
+  await page.locator(".group-list li", { has: page.getByLabel("스테이징 그룹 이름", { exact: true }) }).getByRole("radio", { name: /파랑/ }).click();
+  await expect(group).toHaveClass(/env-blue/);
+
+  // 이름을 바꾸면 사이드바도 따라간다.
+  const name = page.getByLabel("스테이징 그룹 이름", { exact: true });
+  await name.fill("stage");
+  await name.press("Enter");
+  await expect(page.locator(".session-list .section-title", { hasText: "stage" })).toBeVisible();
+
+  // 지우면 사라진다(세션이 없으니 묻지 않는다).
+  await page.getByRole("button", { name: "stage 그룹 지우기" }).click();
+  await expect(page.locator(".session-list .section-title", { hasText: "stage" })).toHaveCount(0);
+});

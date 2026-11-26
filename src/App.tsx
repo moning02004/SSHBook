@@ -21,7 +21,7 @@ import { pickExportPath } from "./lib/dialogs";
 import { sideAt, type DropSide, type SplitDir } from "./lib/layout";
 import * as desks from "./lib/groups";
 import { emptyDesk, type Desk, type TabDrop } from "./lib/groups";
-import { describeSession, type Session, type Snippet } from "./lib/sessions";
+import { describeSession, type Group, type Session, type Snippet } from "./lib/sessions";
 import * as terms from "./lib/terminals";
 import { applyTheme, loadTheme, type ThemeName } from "./lib/theme";
 import { tx } from "./lib/i18n";
@@ -107,6 +107,8 @@ export function App() {
   const [theme, setTheme] = useState<ThemeName>(loadTheme);
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  /** 미리 만든 그룹과 그룹 색. 세션 목록이 바뀔 때마다 다시 읽는다. */
+  const [groupInfos, setGroupInfos] = useState<Group[]>([]);
   // 분할된 칸들과 칸마다의 탭(파이참 에디터 분할처럼)
   const [desk, setDesk] = useState<Desk>(emptyDesk);
   const [panes, setPanes] = useState<Record<string, PaneInfo>>({});
@@ -566,7 +568,31 @@ export function App() {
 
   // ---- 세션과 보관함 ----
 
-  const groups = useMemo(() => [...new Set(sessions.map((s) => s.group?.trim()).filter((g): g is string => !!g))], [sessions]);
+  const unlocked = !!status?.unlocked;
+  useEffect(() => {
+    if (!unlocked) return setGroupInfos([]);
+    let live = true;
+    api
+      .groupsList()
+      .then((g) => live && setGroupInfos(g))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [sessions, unlocked]);
+  // 세션 편집의 그룹 고르기 목록: 미리 만든 그룹 + 세션에 적힌 그룹
+  const groups = useMemo(
+    () =>
+      [...new Set([...groupInfos.map((g) => g.name), ...sessions.map((s) => s.group?.trim()).filter((g): g is string => !!g)])].sort((a, b) =>
+        a.localeCompare(b, "ko"),
+      ),
+    [groupInfos, sessions],
+  );
+  const reloadSessions = async () => {
+    const [list, g] = await Promise.all([api.sessionsList(), api.groupsList()]);
+    setSessions(list);
+    setGroupInfos(g);
+  };
   // 연결이 살아 있는 창이 하나라도 있는 세션
   const connected = new Set(
     Object.entries(panes)
@@ -779,6 +805,7 @@ export function App() {
         {!sidebarHidden && (
           <Sidebar
             sessions={sessions}
+            groups={groupInfos}
             connected={connected}
             selectedId={activeInfo?.sessionId ?? null}
             onOpen={(s) => showSession(s.id)}
@@ -916,6 +943,8 @@ export function App() {
           onVaultChanged={refresh}
           onExport={(pw) => void exportVault(pw)}
           sessions={sessions}
+          groups={groupInfos}
+          onGroupsChanged={reloadSessions}
           onLock={() => {
             // 연결된 탭이 있으면 묻는 창이 설정에 가리지 않게 먼저 닫는다.
             setShowSettings(false);

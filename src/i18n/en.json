@@ -571,5 +571,22 @@
  "이 키 암호를 보관함에 저장할까요? 다음부터 묻지 않고 연결합니다. (y/N) ": "Save this key passphrase to the vault? Next time it connects without asking. (y/N) ",
  "보기": "Show",
  "숨기기": "Hide",
- "알 수 없는 항목입니다.": "Unknown item."
+ "알 수 없는 항목입니다.": "Unknown item.",
+ "세션이 없습니다.": "No sessions.",
+ "그룹 만들기": "New group",
+ "새 그룹 이름": "New group name",
+ "세션 {0}개": "{0} sessions",
+ "그룹 색": "Group color",
+ "{0} 그룹 지우기": "Delete group {0}",
+ "{0} 그룹 이름": "Name of group {0}",
+ "'{0}' 그룹을 지울까요? 세션 {1}개는 그룹 없음으로 옮깁니다.": "Delete group '{0}'? Its {1} sessions move to No group.",
+ "'{0}' 그룹이 이미 있습니다. 두 그룹을 합칠까요?": "Group '{0}' already exists. Merge the two groups?",
+ "그룹을 바꾸지 못했습니다: {0}": "Could not change the group: {0}",
+ "아직 그룹이 없습니다. 위에서 만들면 왼쪽 목록에 바로 보입니다.": "No groups yet. Groups you create here show up in the sidebar right away.",
+ "세션이 없어도 그룹을 미리 만들어 둘 수 있습니다. 색은 왼쪽 목록의 그룹 이름과 안내선에 보입니다.": "You can create groups before adding sessions. The color shows on the group name and guide line in the sidebar.",
+ "그룹 이름을 입력하세요.": "Enter a group name.",
+ "같은 이름의 그룹이 있습니다.": "A group with this name already exists.",
+ "그룹 이름이 너무 깁니다.": "The group name is too long.",
+ "알 수 없는 색입니다.": "Unknown color.",
+ "그룹을 찾지 못했습니다.": "Group not found."
 }
