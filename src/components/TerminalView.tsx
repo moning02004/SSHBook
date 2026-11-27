@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { getPane } from "../lib/terminals";
+import { attachGpuRenderer, getPane } from "../lib/terminals";
 
 interface Props {
   paneId: string;
@@ -17,6 +17,7 @@ export function TerminalView({ paneId, sessionId, active }: Props) {
     const entry = getPane(paneId, sessionId);
     el.appendChild(entry.host);
     if (!entry.term.element) entry.term.open(entry.host);
+    attachGpuRenderer(entry);
 
     const fit = () => {
       if (el.clientWidth > 0 && el.clientHeight > 0) entry.fit.fit();

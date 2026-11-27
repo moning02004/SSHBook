@@ -1,4 +1,5 @@
 mod applog;
+mod fonts;
 mod forward;
 mod fsperm;
 mod i18n;
@@ -883,6 +884,46 @@ fn term_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> 
     }
 }
 
+/// 로컬 셸의 지금 폴더를 Finder·탐색기로 연다. 연 폴더 경로를 돌려준다.
+/// hint: 셸이 OSC 9;9·OSC 7로 알려 준 폴더(Windows에서 쓴다).
+#[tauri::command]
+fn term_reveal_cwd(state: State<'_, AppState>, id: String, hint: Option<String>) -> CmdResult<String> {
+    let dir = match lock(&state.terms).get(&id) {
+        Some(Term::Local(p)) => p.current_dir(hint.as_deref()),
+        Some(Term::Ssh(_)) => return Err("SSH 세션의 폴더는 이 PC에서 열 수 없습니다.".into()),
+        None => return Err("연결이 끊어졌습니다.".into()),
+    }
+    .ok_or("지금 폴더를 알 수 없습니다.")?;
+    pty::reveal_dir(&dir)?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// 터미널 안 프로그램이 OSC 52로 보낸 글자를 클립보드에 넣는다.
+/// 웹뷰의 클립보드 API는 사용자가 누른 순간에만 되는 곳이 있어서(macOS) 앱이 직접 넣는다.
+#[tauri::command]
+fn clipboard_write(text: String) -> CmdResult<()> {
+    const MAX: usize = 1024 * 1024;
+    if text.len() > MAX {
+        return Err("복사할 글자가 너무 깁니다.".into());
+    }
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_text(text))
+        .map_err(|e| format!("클립보드에 넣지 못했습니다: {e}"))
+}
+
+/// 앱 안에서 설치할 수 있는 글꼴 이름
+#[tauri::command]
+fn fonts_installable() -> Vec<&'static str> {
+    fonts::PACKS.iter().map(|p| p.family).collect()
+}
+
+/// 글꼴을 내려받아 이 사용자 계정에 설치한다.
+#[tauri::command]
+async fn font_install(family: String) -> CmdResult<()> {
+    let pack = fonts::pack(&family).ok_or("앱에서 설치할 수 없는 글꼴입니다.")?;
+    fonts::install(pack).await
+}
+
 #[tauri::command]
 fn term_close(state: State<'_, AppState>, id: String) {
     if let Some(t) = lock(&state.terms).remove(&id) {
@@ -1200,6 +1241,10 @@ pub fn run() {
             term_write,
             term_resize,
             term_close,
+            term_reveal_cwd,
+            clipboard_write,
+            fonts_installable,
+            font_install,
             term_auth_answer,
             app_set_language,
             ssh_config_hosts,

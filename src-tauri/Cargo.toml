@@ -28,6 +28,13 @@ base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 # 로컬 셸 (Windows는 ConPTY, macOS는 openpty)
 portable-pty = "0.9"
+# 터미널 안 프로그램이 보낸 복사(OSC 52)를 클립보드에 넣는다. 그림 복사는 쓰지 않는다.
+arboard = { version = "3", default-features = false }
+# 글꼴 내려받기·확인·압축 풀기. 앱 업데이트(tauri-plugin-updater)와 같은 설정을 써서 새로 빌드할 것이 거의 없다.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 uuid = { version = "1", features = ["v4"] }
 # SSH 클라이언트. aws-lc-rs는 Windows에서 NASM이 필요해서 ring 백엔드를 쓴다.
 russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa", "flate2"] }
@@ -42,3 +49,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 codegen-units = 1
 lto = true
 strip = true
+
+# 설치한 글꼴을 바로 불러오고 다른 프로그램에 알린다.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }

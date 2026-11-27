@@ -4,6 +4,13 @@ const MASTER = "Tiger-Moon-Lake-42";
 
 const terminal = (page: Page) => page.locator(".xterm-rows").last();
 
+// 화면 글자를 DOM에서 읽으므로 GPU(WebGL) 그리기는 끈다.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("sshbook.settings")) localStorage.setItem("sshbook.settings", JSON.stringify({ gpuRender: false }));
+  });
+});
+
 async function createVault(page: Page) {
   await page.goto("/");
   const fields = page.locator('input[type="password"]');
@@ -420,20 +427,52 @@ test("세션을 다시 누르면 열린 탭으로 가고, 오른쪽 클릭 메�
   await openLocal(page);
   const tabs = page.locator(".gtab");
   await expect(tabs).toHaveCount(1);
-  await page.getByTitle("localhost 연결 (열린 탭이 있으면 그 탭으로)").click();
+  await page.getByTitle(/^localhost 연결/).click();
   await expect(tabs).toHaveCount(1);
 
   await page.locator(".session-row", { hasText: "localhost" }).click({ button: "right" });
-  await page.getByRole("menuitem", { name: "새 탭으로 추가" }).click();
+  await page.getByRole("menuitem", { name: "새 탭으로 열기" }).click();
   await expect(tabs).toHaveCount(2);
 
   // 다른 탭(새 로컬 셸)에 있다가 세션을 누르면 그 세션의 탭으로 돌아온다.
   await page.getByRole("button", { name: "이 칸에 새 탭 (로컬 셸)" }).click();
   await expect(tabs).toHaveCount(3);
   await expect(tabs.nth(2)).toHaveClass(/selected/);
-  await page.getByTitle("localhost 연결 (열린 탭이 있으면 그 탭으로)").click();
+  await page.getByTitle(/^localhost 연결/).click();
   await expect(tabs).toHaveCount(3);
   await expect(tabs.nth(2)).not.toHaveClass(/selected/);
+});
+
+test("사이드바 세션을 휠 클릭하면 열린 탭이 있어도 새 탭을 연다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const tabs = page.locator(".gtab");
+  await expect(tabs).toHaveCount(1);
+  await page.getByTitle(/^localhost 연결/).click({ button: "middle" });
+  await expect(tabs).toHaveCount(2);
+});
+
+test("세션 오른쪽 클릭 메뉴에서 세션을 제거한다", async ({ page }) => {
+  await createVault(page);
+  await page.locator(".session-row", { hasText: "prod-web-01" }).click({ button: "right" });
+  const menu = page.getByRole("menu");
+  await expect(menu.locator(".menu-title")).toHaveText("prod-web-01");
+  page.once("dialog", (d) => void d.accept());
+  await page.getByRole("menuitem", { name: "제거…" }).click();
+  await expect(page.locator(".session-row", { hasText: "prod-web-01" })).toHaveCount(0);
+});
+
+test("없는 무료 글꼴은 설정에서 바로 설치한다", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("sshbook.settings", JSON.stringify({ gpuRender: false, fontFamily: "D2Coding" })));
+  await createVault(page);
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "화면" }).click();
+  const box = page.locator(".font-missing");
+  await expect(box).toContainText("D2Coding이(가) 이 PC에 없어");
+  await box.getByRole("button", { name: "설치하기" }).click();
+  // 미리보기 브라우저에는 실제로 설치되지 않으므로 다시 시작하라는 안내가 나온다.
+  await expect(box).toContainText("다시 시작하면 적용됩니다");
+  await expect(box.getByRole("button", { name: "다시 시작" })).toBeVisible();
 });
 
 test("탭을 휠 클릭하면 닫는다", async ({ page }) => {
@@ -465,6 +504,33 @@ test("Ctrl+C는 고른 글자가 있으면 복사한다", async ({ page, context
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("localhost");
   // 복사한 뒤에는 선택이 풀려서, 다음 Ctrl+C는 셸로 간다.
   await expect(page.locator(".xterm-selection div")).toHaveCount(0);
+});
+
+test("Shift+Enter는 명령을 실행하지 않고 줄을 바꾼다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  await page.keyboard.type("echo a");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("b");
+  await expect(terminal(page)).toContainText("> b");
+});
+
+test("터미널 안 프로그램이 보낸 복사(OSC 52)를 클립보드에 넣는다", async ({ page, context, browserName }) => {
+  test.skip(browserName !== "chromium", "클립보드 권한");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await createVault(page);
+  await openLocal(page);
+  await page.evaluate(() => navigator.clipboard.writeText(""));
+  await page.keyboard.type("osc52");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("copied by app");
+});
+
+test("로컬 셸 메뉴에 지금 폴더 열기가 있다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  await page.locator(".xterm-screen").last().click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: /지금 폴더를 (탐색기|Finder)에서 열기/ })).toBeEnabled();
 });
 
 test("설정에서 만든 빈 그룹은 사이드바에 '세션이 없습니다.'로 보이고 색을 바꿀 수 있다", async ({ page }) => {

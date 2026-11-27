@@ -213,14 +213,22 @@ body.resizing .term-slot { pointer-events: none; }
 .welcome p { margin: 0; }
 
 /* ---- 오른쪽 클릭 메뉴 ---- */
-.menu { position: fixed; z-index: 50; width: 264px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: var(--pop); }
-.menu button { width: 100%; height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+.menu { position: fixed; z-index: 50; min-width: 208px; max-width: 320px; width: max-content; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: var(--pop); font-size: 13px; outline: none; animation: menu-in 0.09s ease-out; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-3px) scale(0.98); } }
+@media (prefers-reduced-motion: reduce) { .menu { animation: none; } }
+.menu-head { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px 7px; margin-bottom: 4px; border-bottom: 1px solid var(--line-soft); }
+.menu-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu button { width: 100%; height: 30px; display: flex; align-items: center; gap: 9px; padding: 0 10px 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
 .menu button:hover:not(:disabled), .menu button:focus-visible { background: var(--sel); color: var(--accent-text); outline: none; }
 .menu button:disabled { color: var(--off); opacity: 1; }
 .menu button.danger:not(:disabled) { color: var(--danger); }
-.menu .label { flex: 1; }
-.menu .key { font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.menu hr { height: 1px; margin: 5px 6px; border: 0; background: var(--line-soft); }
+.menu button.danger:hover:not(:disabled), .menu button.danger:focus-visible { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.menu-icon { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: var(--muted); }
+.menu button:hover:not(:disabled) .menu-icon, .menu button:focus-visible .menu-icon, .menu button.danger .menu-icon { color: inherit; }
+.menu .label { flex: 1; white-space: nowrap; }
+.menu .key { margin-left: 18px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.menu hr { height: 1px; margin: 4px 4px; border: 0; background: var(--line-soft); }
 
 /* ---- 대화상자 ---- */
 .scrim { position: fixed; inset: 0; z-index: 40; background: var(--scrim); display: flex; justify-content: center; align-items: flex-start; padding: 48px 16px; overflow: auto; }
@@ -285,6 +293,9 @@ body.resizing .term-slot { pointer-events: none; }
 .stepper { display: grid; grid-template-columns: 38px minmax(0, 1fr) 38px; gap: 6px; }
 .stepper .icon-btn { width: 38px; height: 38px; font-size: 16px; }
 .stepper .input { text-align: center; padding: 0 4px; }
+.font-missing { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--sel); font-size: 12.5px; }
+.font-missing span { flex: 1; }
+.font-missing .btn { flex: none; }
 .font-preview { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--term-bg); color: var(--text); white-space: pre; overflow: hidden; text-overflow: ellipsis; user-select: none; }
 .font-preview .p-user { color: var(--ok); }
 .font-preview .p-path { color: var(--accent-text); }

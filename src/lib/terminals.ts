@@ -4,10 +4,12 @@
 
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { AuthPrompt } from "./api";
 import { api, parseOpenError, type OpenOptions } from "./api";
 import { pasteWarning, sanitizePaste } from "./paste";
+import { parseCwdReport, parseOsc52 } from "./osc";
 import { fontStack, getSettings, subscribeSettings, type Settings } from "./settings";
 import { terminalThemes, type ThemeName } from "./theme";
 import { tx } from "./i18n";
@@ -31,6 +33,8 @@ subscribeSettings((s) => {
   const opts = termOptions(s);
   entries.forEach((e) => {
     Object.assign(e.term.options, opts);
+    if (s.gpuRender) attachGpuRenderer(e);
+    else detachGpuRenderer(e);
     refit(e);
   });
 });
@@ -60,6 +64,8 @@ export interface PaneEntry {
   authPrompting: boolean;
   /** 서버 응답 시간(ms). SSH만, 모르면 null */
   latency: number | null;
+  /** 셸이 프롬프트마다 알려 준 지금 폴더(OSC 7·9;9). 모르면 null */
+  cwdHint: string | null;
 }
 
 const entries = new Map<string, PaneEntry>();
@@ -376,6 +382,34 @@ const isMacPlatform = typeof navigator !== "undefined" && navigator.platform.toL
 const isCopyKey = (e: KeyboardEvent) =>
   !isMacPlatform && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.code === "KeyC";
 
+const isShiftEnter = (e: KeyboardEvent) => e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing;
+
+/**
+ * 화면에 붙은 터미널을 GPU(WebGL)로 그린다. 기본(DOM) 방식은 글자마다 요소를 만들어서
+ * 화면 전체를 자주 다시 그리는 프로그램에서 버벅인다. WebGL을 못 쓰거나 GPU가 문맥을
+ * 거둬 가면(창을 너무 많이 열었을 때 등) 기본 방식으로 돌아간다.
+ */
+export function attachGpuRenderer(e: PaneEntry) {
+  if (!getSettings().gpuRender || webgl.has(e.paneId) || !e.term.element) return;
+  try {
+    const addon = new WebglAddon();
+    addon.onContextLoss(() => {
+      addon.dispose();
+      webgl.delete(e.paneId);
+    });
+    e.term.loadAddon(addon);
+    webgl.set(e.paneId, addon);
+  } catch {
+    // WebGL이 없는 환경: 기본 방식 그대로 쓴다.
+  }
+}
+const webgl = new Map<string, WebglAddon>();
+
+function detachGpuRenderer(e: PaneEntry) {
+  webgl.get(e.paneId)?.dispose();
+  webgl.delete(e.paneId);
+}
+
 /** 앱 단축키(분할 등)는 xterm이 셸로 보내지 않도록 걸러낸다. */
 export function setShortcutFilter(fn: (e: KeyboardEvent) => boolean) {
   shortcutFilter = fn;
@@ -392,6 +426,8 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     // 검색 결과 강조(decoration)에 필요하다.
     allowProposedApi: true,
     theme: terminalThemes[currentTheme],
+    // 마우스를 쓰는 프로그램(Claude Code·tmux·vim) 안에서도 Shift(맥은 Option)를 누른 채 끌면 직접 고른다.
+    macOptionClickForcesSelection: true,
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -399,6 +435,13 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
   term.loadAddon(search);
   term.attachCustomKeyEventHandler((e) => {
     if (shortcutFilter(e)) return false;
+    // Shift+Enter: 그냥 Enter와 구별되도록 ESC+Enter(Alt+Enter와 같은 신호)를 보낸다.
+    // Claude Code 같은 프로그램은 이것을 줄바꿈으로 받는다. 셸에서는 명령을 실행하지 않는다.
+    if (isShiftEnter(e)) {
+      if (e.type === "keydown") term.input("\x1b\r", true);
+      e.preventDefault();
+      return false;
+    }
     // Ctrl+C: 고른 글자가 있으면 복사하고 셸로 보내지 않는다. 없으면 평소처럼 인터럽트(^C).
     if (isCopyKey(e) && term.hasSelection()) {
       if (e.type === "keydown") {
@@ -429,9 +472,26 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     promptKey: crypto.randomUUID(),
     authPrompting: false,
     latency: null,
+    cwdHint: null,
     backendId: Promise.resolve(null),
   };
   entries.set(paneId, entry);
+  // 셸이 알려 주는 지금 폴더(OSC 7: file://host/path, OSC 9;9: Windows Terminal 방식)
+  const onCwd = (code: 7 | 9, data: string) => {
+    const dir = parseCwdReport(code, data);
+    if (dir) entry.cwdHint = dir;
+    return dir !== null;
+  };
+  term.parser.registerOscHandler(7, (d) => onCwd(7, d));
+  term.parser.registerOscHandler(9, (d) => onCwd(9, d));
+  // 터미널 안 프로그램이 보내는 복사(OSC 52). 클립보드 읽기 요청('?')은 받지 않는다.
+  term.parser.registerOscHandler(52, (d) => {
+    const text = parseOsc52(d);
+    if (text && getSettings().allowAppCopy) {
+      void api.clipboardWrite(text).catch(() => navigator.clipboard.writeText(text).catch(() => {}));
+    }
+    return true;
+  });
   // ⌘V 등 브라우저 붙여넣기도 xterm에 닿기 전에 같은 검사를 거친다.
   host.addEventListener(
     "paste",
@@ -510,12 +570,24 @@ export async function disposePane(paneId: string) {
     byBackend.delete(id);
     await api.termClose(id).catch(() => {});
   }
+  webgl.delete(paneId);
   e.term.dispose();
   e.host.remove();
 }
 
 export async function disposeAll() {
   await Promise.all([...entries.keys()].map(disposePane));
+}
+
+/** 새로 설치한 글꼴로 다시 그린다(글꼴 이름은 그대로라 옵션을 한 번 바꿔 줘야 한다). */
+export function refreshFonts() {
+  const family = fontStack(getSettings().fontFamily);
+  entries.forEach((e) => {
+    webgl.get(e.paneId)?.clearTextureAtlas();
+    e.term.options.fontFamily = "monospace";
+    e.term.options.fontFamily = family;
+    refit(e);
+  });
 }
 
 export function setTerminalTheme(theme: ThemeName) {
@@ -543,6 +615,13 @@ function safePaste(e: PaneEntry, text: string) {
   const warning = pasteWarning(clean, e.term.modes.bracketedPasteMode, targets);
   if (warning && !window.confirm(warning)) return;
   e.term.paste(clean);
+}
+
+/** 로컬 셸의 지금 폴더를 Finder·탐색기로 연다. 연 경로를 돌려준다. */
+export async function revealCwd(paneId: string): Promise<string> {
+  const e = entries.get(paneId);
+  if (!e?.liveId) throw new Error(tx("연결된 로컬 셸에서만 열 수 있습니다."));
+  return api.termRevealCwd(e.liveId, e.cwdHint);
 }
 
 export function clearPane(paneId: string) {

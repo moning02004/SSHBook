@@ -14,6 +14,10 @@ export interface Settings {
   scrollback: number;
   /** 글자를 끌어서 고르면 바로 복사 */
   copyOnSelect: boolean;
+  /** 터미널 안 프로그램(vim, tmux, Claude Code 등)이 클립보드에 복사하도록 허용 (OSC 52) */
+  allowAppCopy: boolean;
+  /** 터미널을 GPU(WebGL)로 그린다. 그림이 깨지는 PC에서는 끈다 */
+  gpuRender: boolean;
   /** 오른쪽 클릭으로 붙여넣기 (메뉴는 Shift+오른쪽 클릭) */
   rightClickPaste: boolean;
   /** 연결된 창을 닫을 때 묻기 */
@@ -51,6 +55,8 @@ export const DEFAULT_SETTINGS: Settings = {
   cursorBlink: true,
   scrollback: 5000,
   copyOnSelect: false,
+  allowAppCopy: true,
+  gpuRender: true,
   rightClickPaste: false,
   confirmClose: true,
   autoLockMinutes: 15,
@@ -81,6 +87,8 @@ export function normalize(raw: unknown): Settings {
     cursorBlink: bool(r.cursorBlink, d.cursorBlink),
     scrollback: clamp(Math.round(num(r.scrollback, d.scrollback)), 0, 100000),
     copyOnSelect: bool(r.copyOnSelect, d.copyOnSelect),
+    allowAppCopy: bool(r.allowAppCopy, d.allowAppCopy),
+    gpuRender: bool(r.gpuRender, d.gpuRender),
     rightClickPaste: bool(r.rightClickPaste, d.rightClickPaste),
     confirmClose: bool(r.confirmClose, d.confirmClose),
     autoLockMinutes: AUTO_LOCK_CHOICES.includes(num(r.autoLockMinutes, -1)) ? num(r.autoLockMinutes, 0) : d.autoLockMinutes,

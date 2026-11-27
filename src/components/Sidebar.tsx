@@ -11,6 +11,8 @@ interface Props {
   /** 지금 보고 있는 창의 세션 */
   selectedId: string | null;
   onOpen: (s: Session) => void;
+  /** 휠(가운데 버튼) 클릭: 열린 탭이 있어도 새 탭으로 연다 */
+  onOpenNew: (s: Session) => void;
   onEdit: (s: Session) => void;
   /** 세션을 오른쪽 클릭했을 때 */
   onMenu: (s: Session, x: number, y: number) => void;
@@ -30,7 +32,7 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-export function Sidebar({ sessions, groups, connected, selectedId, onOpen, onEdit, onMenu, onNew, onRenameGroup }: Props) {
+export function Sidebar({ sessions, groups, connected, selectedId, onOpen, onOpenNew, onEdit, onMenu, onNew, onRenameGroup }: Props) {
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   // 접은 그룹. 다음에 켤 때도 그대로 둔다.
@@ -125,7 +127,18 @@ export function Sidebar({ sessions, groups, connected, selectedId, onOpen, onEdi
                   onMenu(s, e.clientX, e.clientY);
                 }}
               >
-                <button className="session" onClick={() => onOpen(s)} title={tx("{0} 연결 (열린 탭이 있으면 그 탭으로)", s.name)}>
+                <button
+                  className="session"
+                  onClick={() => onOpen(s)}
+                  // 휠 클릭은 새 탭. 누를 때 막아야 브라우저 자동 스크롤이 뜨지 않는다.
+                  onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+                  onAuxClick={(e) => {
+                    if (e.button !== 1) return;
+                    e.preventDefault();
+                    onOpenNew(s);
+                  }}
+                  title={tx("{0} 연결 (열린 탭이 있으면 그 탭으로, 휠 클릭은 새 탭)", s.name)}
+                >
                   <span className={`dot${connected.has(s.id) ? " on" : ""}`} />
                   <span className="meta">
                     <span className="name">{s.name}</span>

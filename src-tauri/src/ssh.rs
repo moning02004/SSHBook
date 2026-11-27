@@ -9,10 +9,9 @@
 //! - 시작 경로: 셸 대신 `cd 경로; exec $SHELL -l`을 실행한다.
 
 use crate::forward::{self, RemoteMap};
-use crate::pty::{TermData, TermExit};
+use crate::pty::DataPump;
 use crate::termlog::TermLog;
 use crate::vault::Forward;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use russh::client::{self, Handle};
 use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg, Disconnect};
@@ -309,29 +308,18 @@ pub fn app_sink(app: AppHandle, id: String, log: Option<(PathBuf, String)>) -> S
         Some((p, h)) => LogState::Pending(p, h),
         None => LogState::Off,
     });
-    let emit_data = {
-        let app = app.clone();
-        let id = id.clone();
-        move |b: Vec<u8>| {
-            let _ = app.emit(
-                "term-data",
-                TermData {
-                    id: id.clone(),
-                    data: B64.encode(b),
-                },
-            );
-        }
-    };
+    let pump = DataPump::new(app.clone(), id.clone());
     Arc::new(move |o| match o {
         Out::Data(b) => {
             if let Some(warn) = log.lock().unwrap_or_else(|e| e.into_inner()).write(&b) {
-                emit_data(warn.into_bytes());
+                pump.data(warn.into_bytes());
             }
-            emit_data(b);
+            pump.data(b);
         }
         Out::Exit(code) => {
             log.lock().unwrap_or_else(|e| e.into_inner()).finish();
-            let _ = app.emit("term-exit", TermExit { id: id.clone(), code });
+            // 앞서 받은 출력을 다 보낸 뒤에 끝났다고 알린다.
+            pump.exit(code);
         }
         Out::Latency(ms) => {
             let _ = app.emit("term-latency", TermLatency { id: id.clone(), ms });

@@ -214,6 +214,14 @@ export interface Backend {
   termWrite(id: string, data: string): Promise<void>;
   termResize(id: string, cols: number, rows: number): Promise<void>;
   termClose(id: string): Promise<void>;
+  /** 로컬 셸의 지금 폴더를 Finder·탐색기로 열고 그 경로를 돌려준다. hint는 셸이 알려 준 폴더 */
+  termRevealCwd(id: string, hint: string | null): Promise<string>;
+  /** 터미널 안 프로그램이 보낸 복사(OSC 52)를 클립보드에 넣는다 */
+  clipboardWrite(text: string): Promise<void>;
+  /** 앱 안에서 내려받아 설치할 수 있는 글꼴 이름 */
+  fontsInstallable(): Promise<string[]>;
+  /** 글꼴을 내려받아 이 사용자 계정에 설치한다 */
+  fontInstall(family: string): Promise<void>;
   onTermData(cb: (e: TermData) => void): Promise<() => void>;
   onTermExit(cb: (e: TermExit) => void): Promise<() => void>;
   onTermLatency(cb: (e: TermLatency) => void): Promise<() => void>;
@@ -270,6 +278,10 @@ const tauriBackend: Backend = {
   termWrite: (id, data) => invoke("term_write", { id, data }),
   termResize: (id, cols, rows) => invoke("term_resize", { id, cols, rows }),
   termClose: (id) => invoke("term_close", { id }),
+  termRevealCwd: (id, hint) => invoke("term_reveal_cwd", { id, hint }),
+  clipboardWrite: (text) => invoke("clipboard_write", { text }),
+  fontsInstallable: () => invoke("fonts_installable"),
+  fontInstall: (family) => invoke("font_install", { family }),
   onTermData: (cb) => listen<TermData>("term-data", (e) => cb(e.payload)),
   onTermExit: (cb) => listen<TermExit>("term-exit", (e) => cb(e.payload)),
   onTermLatency: (cb) => listen<TermLatency>("term-latency", (e) => cb(e.payload)),
@@ -547,13 +559,32 @@ function createMockBackend(): Backend {
           emit(id, "\r\nlogout\r\n");
           return void setTimeout(() => exitSubs.forEach((cb) => cb({ id, code: 0 })), 30);
         }
+        // 미리보기: 터미널 안 프로그램이 클립보드에 복사하는 것(OSC 52)을 흉내 낸다.
+        if (line === "osc52") return emit(id, `\x1b]52;c;${btoa("copied by app")}\x07\r\n$ `);
         return emit(id, "\r\n$ ");
+      }
+      // 미리보기: Shift+Enter(ESC+Enter)는 명령을 실행하지 않고 다음 줄로 넘긴다.
+      if (data === "\x1b\r") {
+        lines.set(id, (lines.get(id) ?? "") + "\n");
+        return emit(id, "\r\n> ");
       }
       lines.set(id, (lines.get(id) ?? "") + data);
       emit(id, data);
     },
     async termResize() {},
     async termClose() {},
+    async termRevealCwd(_id, hint) {
+      return hint ?? "/home/mock";
+    },
+    async clipboardWrite(text) {
+      await navigator.clipboard.writeText(text);
+    },
+    async fontsInstallable() {
+      return ["D2Coding", "JetBrains Mono", "Fira Code", "Source Code Pro"];
+    },
+    async fontInstall() {
+      await new Promise((r) => setTimeout(r, 300));
+    },
     async hostTrust() {
       if (pendingTrust) trusted.add(pendingTrust);
     },

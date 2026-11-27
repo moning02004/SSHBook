@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   FONT_PRESETS,
   FONT_SIZE,
@@ -16,6 +17,8 @@ import {
 import type { Group, Session } from "../lib/sessions";
 import type { ThemeName } from "../lib/theme";
 import { appVersion, checkForUpdate, installUpdate, useUpdateState } from "../lib/updater";
+import { api } from "../lib/api";
+import { refreshFonts } from "../lib/terminals";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { Dropdown } from "./Dropdown";
 import { GroupSettings } from "./GroupSettings";
@@ -107,9 +110,32 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
   useEscape(onClose);
   const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | "sshconfig" | null>(null);
   const s = useSettings();
-  const installed = useMemo(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])), []);
+  const [installed, setInstalled] = useState(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])));
+  const [installable, setInstallable] = useState<string[]>([]);
+  /** idle · busy(내려받는 중) · done(바로 보임) · restart(다시 시작해야 보임) */
+  const [fontJob, setFontJob] = useState<{ family: string; phase: "busy" | "done" | "restart" } | null>(null);
+  useEffect(() => {
+    api.fontsInstallable().then(setInstallable, () => setInstallable([]));
+  }, []);
+  const installFont = async (family: string) => {
+    setFontJob({ family, phase: "busy" });
+    try {
+      await api.fontInstall(family);
+      // 웹뷰가 새 글꼴을 바로 알아채면 그대로 쓰고, 아니면 다시 시작하라고 알린다.
+      await new Promise((r) => setTimeout(r, 400));
+      const ok = isFontInstalled(family);
+      setInstalled((m) => new Map(m).set(family, ok));
+      if (ok) refreshFonts();
+      setFontJob({ family, phase: ok ? "done" : "restart" });
+    } catch (e) {
+      setFontJob(null);
+      onNotice(tx("글꼴을 설치하지 못했습니다: {0}", e instanceof Error ? e.message : String(e)));
+    }
+  };
   const isPreset = s.fontFamily === "" || FONT_PRESETS.includes(s.fontFamily);
   const [custom, setCustom] = useState(!isPreset);
+  const missing = !custom && s.fontFamily !== "" && installed.get(s.fontFamily) === false ? s.fontFamily : null;
+  const job = fontJob && fontJob.family === s.fontFamily ? fontJob : null;
   const [tab, setTab] = useState<SettingsTab>(lastTab);
   const [lang, setLang] = useState<Language>(savedLanguage);
   const pick = (next: SettingsTab) => {
@@ -166,7 +192,18 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
                       value={custom ? CUSTOM : s.fontFamily}
                       options={[
                         { value: "", label: tx("기본 (Cascadia Mono / SF Mono)") },
-                        ...FONT_PRESETS.map((f) => ({ value: f, label: `${f}${installed.get(f) ? "" : tx(" — 설치 안 됨")}` })),
+                        ...FONT_PRESETS.map((f) => ({
+                          value: f,
+                          label: `${f}${
+                            installed.get(f)
+                              ? ""
+                              : fontJob?.family === f && fontJob.phase === "restart"
+                                ? tx(" — 설치함 · 다시 시작하면 적용")
+                                : installable.includes(f)
+                                  ? tx(" — 설치 안 됨 · 여기서 설치 가능")
+                                  : tx(" — 설치 안 됨")
+                          }`,
+                        })),
                         { value: CUSTOM, label: tx("직접 입력…") },
                       ]}
                       onChange={(v) => {
@@ -198,6 +235,29 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
                     </div>
                   </div>
                 </div>
+                {(missing || job) && (
+                  <div className="font-missing" role="status">
+                    {job?.phase === "done" ? (
+                      <span>{tx("{0}을(를) 설치했습니다.", s.fontFamily)}</span>
+                    ) : job?.phase === "restart" ? (
+                      <>
+                        <span>{tx("{0}을(를) 설치했습니다. SSHBook을 다시 시작하면 적용됩니다.", s.fontFamily)}</span>
+                        <button className="btn" onClick={() => void relaunch()}>
+                          {tx("다시 시작")}
+                        </button>
+                      </>
+                    ) : installable.includes(s.fontFamily) ? (
+                      <>
+                        <span>{tx("{0}이(가) 이 PC에 없어 다른 글꼴로 보입니다. 무료 글꼴이라 바로 설치할 수 있습니다.", s.fontFamily)}</span>
+                        <button className="btn primary" disabled={job?.phase === "busy"} onClick={() => void installFont(s.fontFamily)}>
+                          {job?.phase === "busy" ? tx("설치하는 중…") : tx("설치하기")}
+                        </button>
+                      </>
+                    ) : (
+                      <span>{tx("{0}이(가) 이 PC에 없어 다른 글꼴로 보입니다.", s.fontFamily)}</span>
+                    )}
+                  </div>
+                )}
                 {custom && (
                   <label className="field">
                     <span>{tx("글꼴 이름")}</span>
@@ -221,6 +281,18 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
                   <span>{tx("커서 깜빡임")}</span>
                 </label>
               </section>
+
+              <section className="settings-section">
+                <h3>{tx("그리기")}</h3>
+                <label className="check">
+                  <input type="checkbox" checked={s.gpuRender} onChange={(e) => updateSettings({ gpuRender: e.target.checked })} />
+                  <span>
+                    {tx("GPU로 그리기")}
+                    <br />
+                    <span className="hint">{tx("화면을 자주 다시 그리는 프로그램에서도 부드럽습니다. 글자가 깨지거나 번지면 끄세요.")}</span>
+                  </span>
+                </label>
+              </section>
             </>
           )}
           {tab === "terminal" && (
@@ -233,6 +305,14 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
                     {tx("끌어서 고르면 바로 복사")}
                     <br />
                     <span className="hint">{tx("복사 단축키를 누르지 않아도 클립보드에 들어갑니다.")}</span>
+                  </span>
+                </label>
+                <label className="check">
+                  <input type="checkbox" checked={s.allowAppCopy} onChange={(e) => updateSettings({ allowAppCopy: e.target.checked })} />
+                  <span>
+                    {tx("터미널 안 프로그램의 복사 허용")}
+                    <br />
+                    <span className="hint">{tx("Claude Code·tmux·vim 같은 프로그램이 고른 글자를 클립보드에 넣습니다(OSC 52). 마우스를 쓰는 프로그램에서 직접 고르려면 Shift(맥은 Option)를 누른 채 끌어서 고르세요.")}</span>
                   </span>
                 </label>
                 <label className="check">

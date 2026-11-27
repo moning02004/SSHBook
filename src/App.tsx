@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { ConfirmClose } from "./components/ConfirmClose";
 import { SettingsDialog, useSettings } from "./components/SettingsDialog";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
-import { IconExpand, IconMoon, IconPrompt, IconSettings, IconShrink, IconSidebar, IconSun } from "./components/Icons";
+import { IconCopy, IconEdit, IconExpand, IconMoon, IconPlus, IconPrompt, IconSettings, IconShrink, IconSidebar, IconSun, IconTarget, IconTrash } from "./components/Icons";
 import { HostPicker } from "./components/HostPicker";
 import { SessionEditor } from "./components/SessionEditor";
 import { SnippetsDialog } from "./components/SnippetsDialog";
@@ -401,6 +401,7 @@ export function App() {
       { label: tx("찾기"), shortcut: isMac ? "⌘F" : `${K}F`, onSelect: () => setSearchPane(paneId) },
       { label: tx("명령 모음…"), shortcut: `${K}S`, onSelect: () => void openSnippets() },
       ...(ssh ? ([{ label: sftpPanes.has(paneId) ? tx("파일 창 닫기") : tx("파일 창 열기 (SFTP)"), shortcut: `${K}O`, onSelect: () => toggleSftp(paneId) }] as MenuItem[]) : []),
+      ...(!ssh ? ([{ label: isMac ? tx("지금 폴더를 Finder에서 열기") : tx("지금 폴더를 탐색기에서 열기"), disabled: closed, onSelect: () => revealCwd(paneId) }] as MenuItem[]) : []),
       "separator",
       { label: tx("복사"), shortcut: isMac ? `${K}C` : "Ctrl+C", onSelect: () => terms.copySelection(paneId) },
       { label: tx("붙여넣기"), shortcut: `${K}V`, onSelect: () => void terms.pasteInto(paneId) },
@@ -410,14 +411,23 @@ export function App() {
     ];
   };
 
+  const revealCwd = (paneId: string) =>
+    void terms.revealCwd(paneId).catch((e) => setNotice(tx("폴더를 열지 못했습니다: {0}", e instanceof Error ? e.message : String(e))));
+
   /** 사이드바의 세션을 오른쪽 클릭했을 때 */
   const sessionMenuItems = (s: Session): MenuItem[] => {
     const isOpen = desks.allTabs(desk).some((t) => panes[t]?.sessionId === s.id);
+    const icon = { width: 15, height: 15 };
     return [
-      ...(isOpen ? ([{ label: tx("열린 탭으로 이동"), onSelect: () => showSession(s.id) }] as MenuItem[]) : []),
-      { label: tx("새 탭으로 추가"), onSelect: () => openTab(s.id) },
+      isOpen
+        ? { label: tx("열린 탭으로 이동"), icon: <IconTarget {...icon} />, onSelect: () => showSession(s.id) }
+        : { label: tx("연결"), icon: <IconPrompt {...icon} />, onSelect: () => openTab(s.id) },
+      { label: tx("새 탭으로 열기"), icon: <IconPlus {...icon} />, shortcut: tx("휠 클릭"), onSelect: () => openTab(s.id) },
       "separator",
-      { label: tx("편집"), onSelect: () => setEditing({ session: s }) },
+      { label: tx("편집…"), icon: <IconEdit {...icon} />, onSelect: () => setEditing({ session: s }) },
+      { label: tx("복제"), icon: <IconCopy {...icon} />, onSelect: () => void duplicateSession(s) },
+      "separator",
+      { label: tx("제거…"), icon: <IconTrash {...icon} />, danger: true, onSelect: () => void deleteSession(s) },
     ];
   };
 
@@ -809,6 +819,7 @@ export function App() {
             connected={connected}
             selectedId={activeInfo?.sessionId ?? null}
             onOpen={(s) => showSession(s.id)}
+            onOpenNew={(s) => openTab(s.id)}
             onEdit={(s) => setEditing({ session: s })}
             onMenu={(s, x, y) => setMenu({ session: s, x, y, kind: "session" })}
             onNew={() => setEditing({ session: null })}
@@ -893,6 +904,7 @@ export function App() {
         <ContextMenu
           x={menu.x}
           y={menu.y}
+          header={menu.kind === "session" ? { title: menu.session.name, sub: describeSession(menu.session) } : undefined}
           items={
             menu.kind === "session"
               ? sessionMenuItems(menu.session)

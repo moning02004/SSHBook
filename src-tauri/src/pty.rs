@@ -24,6 +24,101 @@ pub struct LocalPty {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    /// 셸을 시작한 폴더. 지금 폴더를 알 수 없을 때 쓴다.
+    start_dir: Option<PathBuf>,
+}
+
+enum PumpMsg {
+    Data(Vec<u8>),
+    Exit(Option<u32>),
+}
+
+/// 터미널 출력을 화면으로 보내는 통로.
+///
+/// 출력이 잘게 쏟아지면(전체 화면 앱이 다시 그릴 때 등) 이벤트 하나하나가 웹뷰의
+/// 스크립트 실행으로 이어져 화면이 버벅인다. 보내는 동안 쌓인 조각은 한 번에 합쳐 보낸다.
+/// 쌓인 것이 없으면 기다리지 않고 바로 보내서 입력 반응은 그대로다.
+#[derive(Clone)]
+pub struct DataPump(std::sync::mpsc::Sender<PumpMsg>);
+
+/// 한 번에 합쳐 보내는 최대 크기
+const PUMP_MAX: usize = 512 * 1024;
+
+impl DataPump {
+    pub fn new(app: AppHandle, id: String) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<PumpMsg>();
+        std::thread::spawn(move || {
+            let mut exit: Option<Option<u32>> = None;
+            while exit.is_none() {
+                let mut buf = match rx.recv() {
+                    Ok(PumpMsg::Data(b)) => b,
+                    Ok(PumpMsg::Exit(c)) => {
+                        exit = Some(c);
+                        Vec::new()
+                    }
+                    Err(_) => break,
+                };
+                while exit.is_none() && buf.len() < PUMP_MAX {
+                    match rx.try_recv() {
+                        Ok(PumpMsg::Data(b)) => buf.extend_from_slice(&b),
+                        Ok(PumpMsg::Exit(c)) => exit = Some(c),
+                        Err(_) => break,
+                    }
+                }
+                if !buf.is_empty() {
+                    let _ = app.emit(
+                        "term-data",
+                        TermData {
+                            id: id.clone(),
+                            data: B64.encode(&buf),
+                        },
+                    );
+                }
+            }
+            if let Some(code) = exit {
+                let _ = app.emit("term-exit", TermExit { id, code });
+            }
+        });
+        DataPump(tx)
+    }
+
+    pub fn data(&self, b: Vec<u8>) {
+        let _ = self.0.send(PumpMsg::Data(b));
+    }
+
+    /// 앞서 보낸 출력을 모두 보낸 뒤에 끝났다고 알린다.
+    pub fn exit(&self, code: Option<u32>) {
+        let _ = self.0.send(PumpMsg::Exit(code));
+    }
+}
+
+/// 셸이 프롬프트를 그릴 때마다 지금 폴더를 알려 주게 한다(OSC 9;9, Windows Terminal과 같은 방식).
+/// Windows는 다른 프로세스의 지금 폴더를 바로 읽을 수 없고, PowerShell은 `cd`해도
+/// 프로세스 폴더가 바뀌지 않아서 셸이 직접 알려 주는 값을 쓴다.
+#[cfg(windows)]
+fn add_cwd_reporting(cmd: &mut CommandBuilder, prog: &str) {
+    let name = std::path::Path::new(prog.trim_matches('"'))
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        "cmd" => {
+            let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
+            cmd.env("PROMPT", format!(r"$e]9;9;$P$e\{prompt}"));
+        }
+        "powershell" | "pwsh" => {
+            // 사용자 프로필이 정한 프롬프트는 그대로 두고 앞에 알림만 붙인다.
+            let script = concat!(
+                r"$global:__sshbook_prompt = $function:prompt; ",
+                r"function global:prompt { ",
+                r"$l = $executionContext.SessionState.Path.CurrentLocation; ",
+                r"$o = & $global:__sshbook_prompt; ",
+                r#"if ($l.Provider.Name -eq 'FileSystem') { "$([char]27)]9;9;$($l.ProviderPath)$([char]27)\" + $o } else { $o } }"#
+            );
+            cmd.args(["-NoLogo", "-NoExit", "-Command", script]);
+        }
+        _ => {}
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -65,16 +160,28 @@ pub fn spawn(
         })
         .map_err(|e| format!("터미널을 만들지 못했습니다: {e}"))?;
 
-    let mut cmd = match shell.as_deref().map(str::trim) {
-        Some(s) if !s.is_empty() => CommandBuilder::new(s),
-        _ => CommandBuilder::new_default_prog(),
+    let shell = shell.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    #[cfg(windows)]
+    let mut cmd = {
+        // 인자를 붙이려면 기본 셸도 프로그램 이름이 있어야 한다.
+        let prog = shell
+            .map(String::from)
+            .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
+        let mut c = CommandBuilder::new(&prog);
+        add_cwd_reporting(&mut c, &prog);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = match shell {
+        Some(s) => CommandBuilder::new(s),
+        None => CommandBuilder::new_default_prog(),
     };
     let dir = cwd
         .as_deref()
         .filter(|c| !c.trim().is_empty())
         .map(expand_home)
         .or_else(home_dir);
-    if let Some(dir) = dir {
+    if let Some(dir) = &dir {
         cmd.cwd(dir);
     }
     cmd.env("TERM", "xterm-256color");
@@ -88,29 +195,23 @@ pub fn spawn(
     let mut reader = pair.master.try_clone_reader().map_err(e2s)?;
     let writer = pair.master.take_writer().map_err(e2s)?;
 
+    let pump = DataPump::new(app, id);
     std::thread::spawn(move || {
-        let mut buf = [0u8; 16 * 1024];
+        let mut buf = [0u8; 64 * 1024];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let _ = app.emit(
-                        "term-data",
-                        TermData {
-                            id: id.clone(),
-                            data: B64.encode(&buf[..n]),
-                        },
-                    );
-                }
+                Ok(n) => pump.data(buf[..n].to_vec()),
             }
         }
-        let _ = app.emit("term-exit", TermExit { id, code: None });
+        pump.exit(None);
     });
 
     Ok(LocalPty {
         master: pair.master,
         writer,
         child,
+        start_dir: dir,
     })
 }
 
@@ -131,7 +232,153 @@ impl LocalPty {
             .map_err(e2s)
     }
 
+    /// 셸의 지금 폴더. Windows는 셸이 알려 준 값(hint)을 쓰고, 모르면 시작한 폴더로 본다.
+    pub fn current_dir(&self, hint: Option<&str>) -> Option<PathBuf> {
+        #[cfg(not(windows))]
+        {
+            let _ = hint;
+            if let Some(d) = self.child.process_id().and_then(process_cwd) {
+                return Some(d);
+            }
+        }
+        #[cfg(windows)]
+        if let Some(h) = hint.map(str::trim).filter(|h| !h.is_empty()) {
+            return Some(PathBuf::from(h));
+        }
+        self.start_dir.clone().or_else(home_dir)
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    // 출력 예: "p123", "fcwd", "n/Users/me/work"
+    let out = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix('n').map(PathBuf::from))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+/// 네트워크 경로(`\\server\share`, `//server`)인지. 셸 출력으로 들어온 경로라서
+/// 열면 다른 PC로 접속하게 될 수 있어 막는다.
+pub fn is_network_path(s: &str) -> bool {
+    s.starts_with(r"\\") || s.starts_with("//")
+}
+
+/// 폴더를 Finder·탐색기로 연다. 이 PC에 있는 폴더만 연다(파일을 넘기면 실행될 수 있다).
+pub fn reveal_dir(dir: &std::path::Path) -> Result<(), String> {
+    let s = dir.to_string_lossy();
+    if !dir.is_absolute() || is_network_path(&s) {
+        return Err("열 수 없는 경로입니다.".into());
+    }
+    if !dir.is_dir() {
+        return Err(format!("폴더를 찾을 수 없습니다: {s}"));
+    }
+    let prog = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(prog)
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("폴더를 열지 못했습니다: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_paths_are_refused() {
+        assert!(is_network_path(r"\\evil\share"));
+        assert!(is_network_path("//evil/share"));
+        assert!(!is_network_path(r"C:\Users"));
+        assert!(!is_network_path("/Users/me"));
+        assert!(reveal_dir(std::path::Path::new("relative/dir")).is_err());
+    }
+
+    /// 셸 프롬프트가 지금 폴더를 OSC 9;9로 알려 주는지 실제 ConPTY로 확인한다.
+    #[cfg(windows)]
+    fn prompt_reports_cwd(prog: &str) {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 200,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(prog);
+        add_cwd_reporting(&mut cmd, prog);
+        cmd.cwd(std::env::temp_dir());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let want = "\x1b]9;9;C:\\\x1b\\";
+        let mut seen = Vec::new();
+        let mut sent = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            if let Ok(b) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                // ConPTY는 처음에 커서 위치를 묻고 답을 기다린다(앱에서는 xterm이 답한다).
+                if b.windows(4).any(|w| w == b"\x1b[6n") {
+                    writer.write_all(b"\x1b[1;1R").unwrap();
+                }
+                seen.extend(b);
+            }
+            let text = String::from_utf8_lossy(&seen);
+            if !sent && text.contains("\x1b]9;9;") {
+                writer.write_all(b"cd C:\\\r").unwrap();
+                sent = true;
+            }
+            if text.contains(want) {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let text = String::from_utf8_lossy(&seen);
+        assert!(text.contains(want), "{prog}: OSC 9;9로 C:\\를 알리지 않음: {text:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_prompt_reports_cwd() {
+        prompt_reports_cwd("cmd.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_prompt_reports_cwd() {
+        prompt_reports_cwd("powershell.exe");
     }
 }
