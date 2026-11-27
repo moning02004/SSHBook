@@ -197,10 +197,6 @@ impl DataPump {
     }
 }
 
-/// 셸이 프롬프트를 그릴 때마다 지금 폴더를 알려 주게 한다(OSC 9;9, Windows Terminal과 같은 방식).
-/// Windows는 다른 프로세스의 지금 폴더를 바로 읽을 수 없고, PowerShell은 `cd`해도
-/// 프로세스 폴더가 바뀌지 않아서 셸이 직접 알려 주는 값을 쓴다.
-#[cfg(windows)]
 /// 프로그램 이름(소문자, 폴더·확장자 없이). `/`와 `\` 둘 다 폴더 구분으로 본다(어느 OS에서 돌든 같게).
 fn program_stem(prog: &str) -> String {
     let file = prog.trim_matches('"').rsplit(['/', '\\']).next().unwrap_or("");
@@ -211,6 +207,10 @@ fn program_stem(prog: &str) -> String {
     stem.to_lowercase()
 }
 
+/// 셸이 프롬프트를 그릴 때마다 지금 폴더를 알려 주게 한다(OSC 9;9, Windows Terminal과 같은 방식).
+/// Windows는 다른 프로세스의 지금 폴더를 바로 읽을 수 없고, PowerShell은 `cd`해도
+/// 프로세스 폴더가 바뀌지 않아서 셸이 직접 알려 주는 값을 쓴다.
+#[cfg(windows)]
 fn add_cwd_reporting(cmd: &mut CommandBuilder, prog: &str) {
     let name = program_stem(prog);
     match name.as_str() {
