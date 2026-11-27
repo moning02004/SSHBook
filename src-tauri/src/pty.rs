@@ -106,6 +106,16 @@ fn add_cwd_reporting(cmd: &mut CommandBuilder, prog: &str) {
             let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
             cmd.env("PROMPT", format!(r"$e]9;9;$P$e\{prompt}"));
         }
+        // Git Bash(MSYS2). 시스템 폴더의 bash.exe는 WSL을 띄우는 것이라 건드리지 않는다.
+        "bash" if !prog.to_lowercase().contains(r"\system32\") => {
+            // 시작 폴더를 지킨다(없으면 /etc/profile이 홈으로 옮긴다).
+            cmd.env("CHERE_INVOKING", "1");
+            // 프롬프트마다 OSC 7로 지금 폴더(/c/Users/…)를 알린다.
+            cmd.env(
+                "PROMPT_COMMAND",
+                r#"printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD""#,
+            );
+        }
         "powershell" | "pwsh" => {
             // 사용자 프로필이 정한 프롬프트는 그대로 두고 앞에 알림만 붙인다.
             let script = concat!(
@@ -160,20 +170,30 @@ pub fn spawn(
         })
         .map_err(|e| format!("터미널을 만들지 못했습니다: {e}"))?;
 
-    let shell = shell.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // "wsl.exe -d Ubuntu"처럼 인자를 붙여 쓸 수 있다.
+    let argv = shell.as_deref().map(split_command).filter(|a| !a.is_empty());
+    let explicit_cwd = cwd.as_deref().is_some_and(|c| !c.trim().is_empty());
     #[cfg(windows)]
     let mut cmd = {
         // 인자를 붙이려면 기본 셸도 프로그램 이름이 있어야 한다.
-        let prog = shell
-            .map(String::from)
-            .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
-        let mut c = CommandBuilder::new(&prog);
-        add_cwd_reporting(&mut c, &prog);
+        let argv = argv.unwrap_or_else(default_windows_shell);
+        let mut c = CommandBuilder::new(&argv[0]);
+        c.args(&argv[1..]);
+        // WSL은 시작 폴더를 따로 정하지 않았으면 리눅스 홈에서 연다(C:\Users\… 대신).
+        if is_wsl(&argv[0]) && !explicit_cwd && !argv.iter().any(|a| a == "--cd") {
+            c.args(["--cd", "~"]);
+        }
+        add_cwd_reporting(&mut c, &argv[0]);
         c
     };
     #[cfg(not(windows))]
-    let mut cmd = match shell {
-        Some(s) => CommandBuilder::new(s),
+    let mut cmd = match argv {
+        Some(argv) => {
+            let _ = explicit_cwd;
+            let mut c = CommandBuilder::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
         None => CommandBuilder::new_default_prog(),
     };
     let dir = cwd
@@ -243,7 +263,7 @@ impl LocalPty {
         }
         #[cfg(windows)]
         if let Some(h) = hint.map(str::trim).filter(|h| !h.is_empty()) {
-            return Some(PathBuf::from(h));
+            return Some(PathBuf::from(msys_to_windows(h)));
         }
         self.start_dir.clone().or_else(home_dir)
     }
@@ -251,6 +271,176 @@ impl LocalPty {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+/// 셸 명령 문자열을 프로그램과 인자로 나눈다. 큰따옴표로 감싸면 공백을 포함한다.
+/// (Windows 경로의 `\`는 그대로 둔다)
+pub fn split_command(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut has = false;
+    for ch in s.trim().chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                has = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if has {
+                    out.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has = true;
+            }
+        }
+    }
+    if has {
+        out.push(cur);
+    }
+    out
+}
+
+/// Git for Windows의 bash.exe. 보통 설치 위치를 보고, 없으면 PATH의 git.exe에서 거슬러 올라가 찾는다
+/// (git.exe는 `Git\cmd`나 `Git\ucrt64\bin`처럼 버전마다 위치가 다르다).
+#[cfg(windows)]
+pub fn git_bash() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|p| PathBuf::from(p).join("Git"))
+        .collect();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join(r"Programs\Git"));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join("git.exe").is_file() {
+                roots.extend(dir.ancestors().skip(1).take(3).map(PathBuf::from));
+            }
+        }
+    }
+    roots.into_iter().map(|r| r.join(r"bin\bash.exe")).find(|b| b.is_file())
+}
+
+#[cfg(windows)]
+fn git_bash_command(bash: &std::path::Path) -> String {
+    format!("\"{}\" --login -i", bash.display())
+}
+
+/// 셸을 정하지 않았을 때: 리눅스 명령을 쓸 수 있게 Git Bash가 있으면 그것, 없으면 PowerShell
+/// (Windows PowerShell은 모든 Windows에 있고 ls·cat·pwd 같은 별칭도 된다).
+#[cfg(windows)]
+fn default_windows_shell() -> Vec<String> {
+    match git_bash() {
+        Some(bash) => vec![bash.to_string_lossy().into_owned(), "--login".into(), "-i".into()],
+        None => vec!["powershell.exe".into()],
+    }
+}
+
+/// Git Bash(MSYS) 경로를 Windows 경로로: `/c/Users/me` → `C:\Users\me`. 그 밖의 경로는 그대로.
+pub fn msys_to_windows(p: &str) -> String {
+    let b = p.as_bytes();
+    if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+        let rest = p[2..].replace('/', "\\");
+        return format!(
+            "{}:{}",
+            (b[1] as char).to_ascii_uppercase(),
+            if rest.is_empty() { "\\".into() } else { rest }
+        );
+    }
+    p.to_string()
+}
+
+/// 프로그램 이름이 WSL인지(wsl, wsl.exe, 전체 경로)
+pub fn is_wsl(prog: &str) -> bool {
+    std::path::Path::new(prog)
+        .file_stem()
+        .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("wsl"))
+}
+
+/// 이 PC에서 고를 수 있는 셸. (보이는 이름, 셸 칸에 넣을 명령)
+#[derive(Serialize, Clone)]
+pub struct ShellChoice {
+    pub label: String,
+    pub command: String,
+}
+
+#[cfg(windows)]
+pub fn available_shells() -> Vec<ShellChoice> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let run = |prog: &str, args: &[&str]| {
+        std::process::Command::new(prog)
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    let choice = |label: &str, command: String| ShellChoice {
+        label: label.to_string(),
+        command,
+    };
+    let mut out = Vec::new();
+    if let Some(bash) = git_bash() {
+        out.push(choice("Git Bash", git_bash_command(&bash)));
+    }
+    out.push(choice("명령 프롬프트 (cmd)", "cmd.exe".into()));
+    out.push(choice("Windows PowerShell", "powershell.exe".into()));
+    if run("where.exe", &["pwsh.exe"]).is_some() {
+        out.push(choice("PowerShell 7", "pwsh.exe".into()));
+    }
+    // `wsl -l -q`는 UTF-16LE로 배포판 이름을 한 줄씩 낸다.
+    if let Some(o) = run("wsl.exe", &["-l", "-q"]) {
+        let wide: Vec<u16> = o
+            .stdout
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .collect();
+        for name in String::from_utf16_lossy(&wide).lines() {
+            let name = name.trim().trim_matches('\0');
+            if name.is_empty() {
+                continue;
+            }
+            let arg = if name.contains(' ') {
+                format!("\"{name}\"")
+            } else {
+                name.to_string()
+            };
+            out.push(ShellChoice {
+                label: format!("WSL: {name}"),
+                command: format!("wsl.exe -d {arg}"),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn available_shells() -> Vec<ShellChoice> {
+    let mut out: Vec<ShellChoice> = Vec::new();
+    let list = std::fs::read_to_string("/etc/shells").unwrap_or_default();
+    for line in list.lines().map(str::trim) {
+        if !line.starts_with('/') || !std::path::Path::new(line).exists() {
+            continue;
+        }
+        let name = line.rsplit('/').next().unwrap_or(line).to_string();
+        // 같은 이름(/bin/zsh, /usr/bin/zsh)은 처음 것만 둔다.
+        if out.iter().any(|c| c.label == name) || matches!(name.as_str(), "nologin" | "false") {
+            continue;
+        }
+        out.push(ShellChoice {
+            label: name,
+            command: line.to_string(),
+        });
+    }
+    out
 }
 
 #[cfg(target_os = "linux")]
@@ -307,6 +497,32 @@ pub fn reveal_dir(dir: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_commands_split_into_args() {
+        assert_eq!(
+            split_command("wsl.exe -d Ubuntu-24.04"),
+            ["wsl.exe", "-d", "Ubuntu-24.04"]
+        );
+        assert_eq!(split_command("  zsh  "), ["zsh"]);
+        assert_eq!(
+            split_command(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#),
+            [r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo"]
+        );
+        assert_eq!(split_command(r#"wsl -d "My Distro""#), ["wsl", "-d", "My Distro"]);
+        assert!(split_command("   ").is_empty());
+        assert!(is_wsl("wsl.exe") && is_wsl("WSL") && is_wsl(r"C:\Windows\System32\wsl.exe"));
+        assert!(!is_wsl("bash"));
+    }
+
+    /// 이 PC의 셸 목록을 보여 준다(WSL이 있으면 배포판도 나온다).
+    #[test]
+    #[ignore]
+    fn print_available_shells() {
+        for c in available_shells() {
+            println!("{} => {}", c.label, c.command);
+        }
+    }
 
     #[test]
     fn network_paths_are_refused() {
@@ -368,6 +584,76 @@ mod tests {
         let _ = child.kill();
         let text = String::from_utf8_lossy(&seen);
         assert!(text.contains(want), "{prog}: OSC 9;9로 C:\\를 알리지 않음: {text:?}");
+    }
+
+    #[test]
+    fn msys_paths_become_windows_paths() {
+        assert_eq!(msys_to_windows("/c/Users/me"), r"C:\Users\me");
+        assert_eq!(msys_to_windows("/d"), r"D:\");
+        assert_eq!(msys_to_windows(r"C:\Users"), r"C:\Users");
+        assert_eq!(msys_to_windows("/home/me"), "/home/me");
+        assert_eq!(msys_to_windows("/usr"), "/usr");
+    }
+
+    /// Git Bash가 있으면 기본 셸이 되고, 프롬프트가 지금 폴더를 OSC 7로 알린다.
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_is_default_and_reports_cwd() {
+        let Some(bash) = git_bash() else {
+            eprintln!("Git Bash가 없어 건너뜀");
+            return;
+        };
+        let argv = default_windows_shell();
+        assert_eq!(PathBuf::from(&argv[0]), bash);
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 200,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        add_cwd_reporting(&mut cmd, &argv[0]);
+        cmd.cwd(std::env::temp_dir());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut seen = Vec::new();
+        let mut sent = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let want = "/c\x1b\\";
+        while std::time::Instant::now() < deadline {
+            if let Ok(b) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                if b.windows(4).any(|w| w == b"\x1b[6n") {
+                    writer.write_all(b"\x1b[1;1R").unwrap();
+                }
+                seen.extend(b);
+            }
+            let text = String::from_utf8_lossy(&seen);
+            if !sent && text.contains("\x1b]7;file://") {
+                writer.write_all(b"cd /c && ls -d /c/Windows\r").unwrap();
+                sent = true;
+            }
+            if sent && text.contains(want) && text.contains("/c/Windows") {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let text = String::from_utf8_lossy(&seen);
+        assert!(text.contains(want), "OSC 7로 /c를 알리지 않음: {text:?}");
+        assert!(text.contains("/c/Windows"), "ls가 동작하지 않음: {text:?}");
     }
 
     #[cfg(windows)]

@@ -22,6 +22,7 @@ import { refreshFonts } from "../lib/terminals";
 import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { Dropdown } from "./Dropdown";
 import { GroupSettings } from "./GroupSettings";
+import { ShellInput } from "./ShellInput";
 import { IconClose, IconExport, IconUnlock } from "./Icons";
 import { ImportSshConfigDialog } from "./ImportSshConfigDialog";
 import { KnownHostsDialog } from "./KnownHostsDialog";
@@ -299,6 +300,16 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
             <>
               <section className="settings-section">
                 <h3>{tx("동작")}</h3>
+                <div className="field">
+                  <span className="field-label">{tx("기본 로컬 셸")}</span>
+                  <ShellInput
+                    value={s.defaultShell}
+                    onChange={(defaultShell) => updateSettings({ defaultShell })}
+                    placeholder={tx("비우면 기본 셸 (Windows는 Git Bash, 없으면 PowerShell)")}
+                    ariaLabel={tx("기본 로컬 셸")}
+                  />
+                  <span className="hint">{tx("세션 없이 여는 로컬 셸 탭에 씁니다. Windows는 Git Bash가 있으면 ls·grep 같은 리눅스 명령을 바로 쓰도록 Git Bash로 엽니다(Git for Windows에 들어 있음). 세션마다 다른 셸은 세션 편집 → 로컬 셸에서 정합니다.")}</span>
+                </div>
                 <label className="check">
                   <input type="checkbox" checked={s.copyOnSelect} onChange={(e) => updateSettings({ copyOnSelect: e.target.checked })} />
                   <span>

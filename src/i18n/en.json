@@ -320,7 +320,6 @@
  "세션 편집": "Edit session",
  "세션 편집 → 고급에서 '출력 기록 저장'을 켠 세션의 출력과, 연결 실패 같은 오류 원인(sshbook-app.log)이 이 폴더에 남습니다. 비밀번호는 남기지 않습니다.": "This folder holds output from sessions with \"Save output log\" on (Session → Log) and error causes such as failed connections (sshbook-app.log). Passwords are not logged.",
  "세션과 키를 담을 보관함을 만듭니다. 이 파일과 마스터 비밀번호만 있으면 다른 PC에서도 열 수 있습니다.": "Create a vault for your sessions and keys. With this file and the master password, you can open it on another PC.",
- "셸 (비우면 OS 기본 셸)": "Shell (empty uses the OS default)",
  "셸을 실행하지 못했습니다: {}": "Could not start the shell: {}",
  "셸을 열지 못했습니다": "Could not open the shell",
  "스크롤 기록": "Scrollback",
@@ -627,5 +626,11 @@
  "압축을 풀지 못했습니다: {}": "Could not extract the archive: {}",
  "압축 파일에 {}가 없습니다: {}": "The archive does not contain {}: {}",
  "글꼴을 등록하지 못했습니다.": "Could not register the font.",
- " — 설치함 · 다시 시작하면 적용": " — installed · restart to use"
+ " — 설치함 · 다시 시작하면 적용": " — installed · restart to use",
+ "셸": "Shell",
+ "기본 로컬 셸": "Default local shell",
+ "명령 프롬프트 (cmd)": "Command Prompt (cmd)",
+ "세션 없이 여는 로컬 셸 탭에 씁니다. Windows는 Git Bash가 있으면 ls·grep 같은 리눅스 명령을 바로 쓰도록 Git Bash로 엽니다(Git for Windows에 들어 있음). 세션마다 다른 셸은 세션 편집 → 로컬 셸에서 정합니다.": "Used for local shell tabs opened without a session. On Windows, Git Bash (part of Git for Windows) is used when installed so Linux commands like ls and grep just work. Set a shell per session in Edit Session → Local Shell.",
+ "셸 (비우면 기본 셸)": "Shell (empty for the default)",
+ "비우면 기본 셸 (Windows는 Git Bash, 없으면 PowerShell)": "Leave empty for the default (Git Bash on Windows, else PowerShell)"
 }

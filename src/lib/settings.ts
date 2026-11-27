@@ -18,6 +18,8 @@ export interface Settings {
   allowAppCopy: boolean;
   /** 터미널을 GPU(WebGL)로 그린다. 그림이 깨지는 PC에서는 끈다 */
   gpuRender: boolean;
+  /** 세션 없이 여는 로컬 셸의 셸 명령(예: wsl.exe -d Ubuntu). 비우면 OS 기본 */
+  defaultShell: string;
   /** 오른쪽 클릭으로 붙여넣기 (메뉴는 Shift+오른쪽 클릭) */
   rightClickPaste: boolean;
   /** 연결된 창을 닫을 때 묻기 */
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: Settings = {
   copyOnSelect: false,
   allowAppCopy: true,
   gpuRender: true,
+  defaultShell: "",
   rightClickPaste: false,
   confirmClose: true,
   autoLockMinutes: 15,
@@ -89,6 +92,7 @@ export function normalize(raw: unknown): Settings {
     copyOnSelect: bool(r.copyOnSelect, d.copyOnSelect),
     allowAppCopy: bool(r.allowAppCopy, d.allowAppCopy),
     gpuRender: bool(r.gpuRender, d.gpuRender),
+    defaultShell: typeof r.defaultShell === "string" ? r.defaultShell.slice(0, 300) : d.defaultShell,
     rightClickPaste: bool(r.rightClickPaste, d.rightClickPaste),
     confirmClose: bool(r.confirmClose, d.confirmClose),
     autoLockMinutes: AUTO_LOCK_CHOICES.includes(num(r.autoLockMinutes, -1)) ? num(r.autoLockMinutes, 0) : d.autoLockMinutes,

@@ -12,6 +12,7 @@ import {
   type Session,
 } from "../lib/sessions";
 import { ComboBox } from "./ComboBox";
+import { ShellInput } from "./ShellInput";
 import { PasswordInput } from "./PasswordInput";
 import { Dropdown } from "./Dropdown";
 import { IconClose, IconPlus, IconTrash } from "./Icons";
@@ -284,10 +285,10 @@ export function SessionEditor({ initial, groups, sessions, onSave, onDelete, onD
                   <section className="form-section">
                     <h3>{tx("로컬 셸")}</h3>
                     <div className="grid2">
-                      <label className="field">
-                        <span>{tx("셸 (비우면 OS 기본 셸)")}</span>
-                        <input className="input mono" value={s.shell ?? ""} onChange={(e) => set({ shell: e.target.value })} placeholder="zsh, bash, pwsh.exe…" />
-                      </label>
+                      <div className="field">
+                        <span className="field-label">{tx("셸 (비우면 기본 셸)")}</span>
+                        <ShellInput value={s.shell ?? ""} onChange={(shell) => set({ shell })} placeholder="zsh, pwsh.exe, wsl.exe -d Ubuntu…" ariaLabel={tx("셸")} />
+                      </div>
                       <label className="field">
                         <span>{tx("시작 폴더")}</span>
                         <input className="input mono" value={s.cwd ?? ""} onChange={(e) => set({ cwd: e.target.value })} placeholder="~" />

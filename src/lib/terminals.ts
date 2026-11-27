@@ -66,6 +66,11 @@ export interface PaneEntry {
   latency: number | null;
   /** 셸이 프롬프트마다 알려 준 지금 폴더(OSC 7·9;9). 모르면 null */
   cwdHint: string | null;
+  /** 한글 같은 IME 글자를 조합하는 중인지(compositionstart~end) */
+  composing: boolean;
+  /** 조합 중에 Shift+Enter를 눌러 조합이 끝나면 보낼 줄바꿈 */
+  pendingNewline: boolean;
+  imeWired: boolean;
 }
 
 const entries = new Map<string, PaneEntry>();
@@ -289,7 +294,11 @@ function fail(entry: PaneEntry, text: string): null {
 /** 접속을 시도하고, 호스트 키 확인이나 비밀번호가 필요하면 터미널에서 물어본 뒤 다시 시도한다. */
 async function connect(entry: PaneEntry): Promise<string | null> {
   const { term } = entry;
-  const opts: OpenOptions = { promptKey: entry.promptKey };
+  const opts: OpenOptions = {
+    promptKey: entry.promptKey,
+    // 세션 없이 여는 로컬 셸은 설정의 기본 로컬 셸로 연다.
+    shell: entry.sessionId ? undefined : getSettings().defaultShell.trim() || undefined,
+  };
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
       const id = await openCancellable(entry, opts);
@@ -382,7 +391,38 @@ const isMacPlatform = typeof navigator !== "undefined" && navigator.platform.toL
 const isCopyKey = (e: KeyboardEvent) =>
   !isMacPlatform && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.code === "KeyC";
 
-const isShiftEnter = (e: KeyboardEvent) => e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing;
+const isShiftEnter = (e: KeyboardEvent) => e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+
+/** Shift+Enter가 보내는 줄바꿈 신호(ESC+Enter, Alt+Enter와 같다) */
+const SHIFT_ENTER = "\x1b\r";
+
+/** IME가 조합에 쓰는 키(글자·지우기). 조합 중에는 xterm이 아니라 IME가 받아야 한다. */
+const isImeKey = (e: KeyboardEvent) =>
+  !e.ctrlKey && !e.metaKey && (e.keyCode === 229 || e.key === "Process" || e.key === "Unidentified" || e.key === "Backspace" || e.key.length === 1);
+
+/**
+ * 한글 조합 상태를 따라간다. 화면에 붙인 뒤(textarea가 생긴 뒤) 한 번 부른다.
+ *
+ * xterm은 조합 중에 키 코드가 229가 아닌 키가 오면 조합을 그 자리에서 끊고 보낸다.
+ * macOS WebKit은 한글 조합 중에도 실제 키 코드를 보낼 때가 있어서 "가나다"가 "ㄱ나"처럼
+ * 잘렸다. 조합 중인 글자 키는 xterm을 거치지 않고 IME가 끝까지 처리하게 한다.
+ * xterm의 compositionend 처리(다음 틱에 글자를 보냄)보다 뒤에 붙여야 해서 open 뒤에 등록한다.
+ */
+export function wireIme(e: PaneEntry) {
+  const ta = e.term.textarea;
+  if (e.imeWired || !ta) return;
+  e.imeWired = true;
+  ta.addEventListener("compositionstart", () => {
+    e.composing = true;
+  });
+  ta.addEventListener("compositionend", () => {
+    e.composing = false;
+    if (!e.pendingNewline) return;
+    e.pendingNewline = false;
+    // xterm이 조합한 글자를 보낸 다음(setTimeout 0) 줄바꿈을 보낸다.
+    setTimeout(() => e.term.input(SHIFT_ENTER, true), 0);
+  });
+}
 
 /**
  * 화면에 붙은 터미널을 GPU(WebGL)로 그린다. 기본(DOM) 방식은 글자마다 요소를 만들어서
@@ -438,10 +478,27 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     // Shift+Enter: 그냥 Enter와 구별되도록 ESC+Enter(Alt+Enter와 같은 신호)를 보낸다.
     // Claude Code 같은 프로그램은 이것을 줄바꿈으로 받는다. 셸에서는 명령을 실행하지 않는다.
     if (isShiftEnter(e)) {
-      if (e.type === "keydown") term.input("\x1b\r", true);
+      const entry = entries.get(paneId);
+      if (entry && (entry.composing || e.isComposing || e.keyCode === 229)) {
+        // 아직 조합 중인 글자("가나다"의 "다")가 있다. IME가 글자를 확정하게 두고 그 뒤에 보낸다.
+        if (e.type === "keydown" && !entry.pendingNewline) {
+          entry.pendingNewline = true;
+          // compositionend가 오지 않는 IME도 있어서 잠시 뒤에는 그냥 보낸다.
+          setTimeout(() => {
+            if (!entry.pendingNewline) return;
+            entry.pendingNewline = false;
+            term.input(SHIFT_ENTER, true);
+          }, 80);
+        }
+        return false;
+      }
+      // 방금 조합이 끝났다면 xterm이 글자를 다음 틱에 보내므로 그 뒤로 미룬다.
+      if (e.type === "keydown") setTimeout(() => term.input(SHIFT_ENTER, true), 0);
       e.preventDefault();
       return false;
     }
+    // 한글 조합 중인 글자·지우기 키는 IME에 맡긴다(xterm이 조합을 중간에 끊지 않게).
+    if (e.type === "keydown" && (entries.get(paneId)?.composing || e.isComposing) && isImeKey(e)) return false;
     // Ctrl+C: 고른 글자가 있으면 복사하고 셸로 보내지 않는다. 없으면 평소처럼 인터럽트(^C).
     if (isCopyKey(e) && term.hasSelection()) {
       if (e.type === "keydown") {
@@ -473,6 +530,9 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     authPrompting: false,
     latency: null,
     cwdHint: null,
+    composing: false,
+    pendingNewline: false,
+    imeWired: false,
     backendId: Promise.resolve(null),
   };
   entries.set(paneId, entry);

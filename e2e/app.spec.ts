@@ -317,6 +317,58 @@ test("한글 조합 입력은 완성된 글자로 한 번만 보낸다", async (
   expect(sent.join("")).not.toContain("ㅎ");
 });
 
+// macOS WebKit은 한글 조합 중에도 실제 키 코드(229가 아닌)를 보낼 때가 있다(이슈 #7).
+async function typeHangulLikeWebKit(page: Page, steps: [string, string][], end: string, shiftEnterBeforeEnd: boolean) {
+  return page.locator(".xterm-helper-textarea").last().evaluate(
+    async (el, { steps, end, shiftEnterBeforeEnd }) => {
+      const { api } = await import("/src/lib/api.ts" as string);
+      const out: string[] = [];
+      api.termWrite = async (_id: string, data: string) => void out.push(data);
+      const ta = el as HTMLTextAreaElement;
+      ta.focus();
+      ta.value = "";
+      const tick = () => new Promise((r) => setTimeout(r, 5));
+      let composing = false;
+      for (const [key, value] of steps) {
+        // 조합을 시작하는 첫 키는 229로 오고, 조합 중인 키는 실제 키 코드(65 등)로 온다.
+        const keyCode = composing ? key.toUpperCase().charCodeAt(0) : 229;
+        ta.dispatchEvent(new KeyboardEvent("keydown", { key: composing ? key : "Process", keyCode, bubbles: true, cancelable: true, isComposing: composing }));
+        if (!composing) {
+          ta.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+          composing = true;
+        }
+        ta.value = value;
+        ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: value }));
+        ta.dispatchEvent(new InputEvent("input", { data: value, inputType: "insertCompositionText", isComposing: true }));
+        await tick();
+      }
+      if (shiftEnterBeforeEnd) {
+        ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, shiftKey: true, bubbles: true, cancelable: true }));
+      }
+      ta.value = end;
+      ta.dispatchEvent(new CompositionEvent("compositionend", { data: end }));
+      await new Promise((r) => setTimeout(r, 150));
+      return out.join("");
+    },
+    { steps, end, shiftEnterBeforeEnd },
+  );
+}
+
+test("한글 조합 중 키 코드가 229가 아니어도 자모가 잘리지 않는다 (맥)", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  // 가 → 간 → 가나(앞 글자 확정 없이 한 조합 안에서) → 가낟 → 가나다
+  const sent = await typeHangulLikeWebKit(page, [["r", "ㄱ"], ["k", "가"], ["s", "간"], ["k", "가나"], ["e", "가낟"], ["k", "가나다"]], "가나다", false);
+  expect(sent).toBe("가나다");
+});
+
+test("한글 조합 중 Shift+Enter는 마지막 글자를 보낸 뒤에 줄을 바꾼다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const sent = await typeHangulLikeWebKit(page, [["e", "ㄷ"], ["k", "다"]], "다", true);
+  expect(sent).toBe("다\x1b\r");
+});
+
 test("~/.ssh/config에서 없는 호스트만 가져온다", async ({ page }) => {
   await createVault(page);
   await page.getByRole("button", { name: "설정", exact: true }).click();
@@ -463,7 +515,11 @@ test("세션 오른쪽 클릭 메뉴에서 세션을 제거한다", async ({ pag
 });
 
 test("없는 무료 글꼴은 설정에서 바로 설치한다", async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("sshbook.settings", JSON.stringify({ gpuRender: false, fontFamily: "D2Coding" })));
+  await page.addInitScript(() => {
+    localStorage.setItem("sshbook.settings", JSON.stringify({ gpuRender: false, fontFamily: "D2Coding" }));
+    // 이 PC에 D2Coding이 이미 있어도 '없음'으로 보이게 글자 폭을 늘 같게 잰다.
+    CanvasRenderingContext2D.prototype.measureText = () => ({ width: 100 }) as TextMetrics;
+  });
   await createVault(page);
   await page.getByRole("button", { name: "설정", exact: true }).click();
   await page.getByRole("tab", { name: "화면" }).click();
@@ -473,6 +529,72 @@ test("없는 무료 글꼴은 설정에서 바로 설치한다", async ({ page }
   // 미리보기 브라우저에는 실제로 설치되지 않으므로 다시 시작하라는 안내가 나온다.
   await expect(box).toContainText("다시 시작하면 적용됩니다");
   await expect(box.getByRole("button", { name: "다시 시작" })).toBeVisible();
+});
+
+test("파일 창에서 새 폴더를 만들고 이름을 바꾼다 (맥 웹뷰는 window.prompt가 없다)", async ({ page }) => {
+  // window.prompt를 쓰면 실패하도록 막는다.
+  await page.addInitScript(() => {
+    window.prompt = () => {
+      throw new Error("window.prompt 사용");
+    };
+  });
+  await createVault(page);
+  await page.getByTitle(/^prod-web-01 연결/).click();
+  await expect(terminal(page)).toContainText("yes/no");
+  await page.keyboard.type("yes");
+  await page.keyboard.press("Enter");
+  await expect(terminal(page)).toContainText("prod-web-01 $");
+  await page.locator(".xterm-screen").last().click({ button: "right" });
+  await page.getByRole("menuitem", { name: "파일 창 열기 (SFTP)" }).click();
+  const panel = page.getByRole("complementary", { name: "원격 파일" });
+  await expect(panel.getByRole("option").first()).toBeVisible();
+
+  await panel.getByRole("button", { name: "새 폴더" }).click();
+  await panel.getByRole("textbox", { name: "새 폴더 이름" }).fill("배포-기록");
+  await page.keyboard.press("Enter");
+  await expect(panel.getByRole("option", { name: /배포-기록/ })).toBeVisible();
+
+  await panel.getByRole("option", { name: /배포-기록/ }).hover();
+  await panel.getByRole("button", { name: "배포-기록 이름 바꾸기" }).click();
+  await panel.getByRole("textbox", { name: "새 이름" }).fill("배포-로그");
+  await page.keyboard.press("Enter");
+  await expect(panel.getByRole("option", { name: /배포-로그/ })).toBeVisible();
+  await expect(panel.getByRole("option", { name: /배포-기록/ })).toHaveCount(0);
+
+  // Esc는 취소하고 파일 창은 닫지 않는다.
+  await panel.getByRole("button", { name: "새 폴더" }).click();
+  await panel.getByRole("textbox", { name: "새 폴더 이름" }).fill("만들지-않음");
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole("option", { name: /만들지-않음/ })).toHaveCount(0);
+});
+
+test("설정의 기본 로컬 셸(WSL)로 로컬 셸 탭을 연다", async ({ page }) => {
+  await createVault(page);
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "터미널" }).click();
+  const field = page.getByRole("combobox", { name: "기본 로컬 셸" });
+  await field.click();
+  // 이 PC에서 찾은 셸 목록에서 고른다.
+  await page.getByRole("option", { name: "wsl.exe -d Ubuntu-24.04" }).click();
+  await expect(field).toHaveValue("wsl.exe -d Ubuntu-24.04");
+  await page.getByRole("button", { name: "닫기", exact: true }).first().click();
+  await openLocal(page);
+
+  const shells = await page.evaluate(async () => {
+    const { api } = await import("/src/lib/api.ts" as string);
+    const seen: (string | null | undefined)[] = [];
+    const open = api.termOpen.bind(api);
+    api.termOpen = (sid: string | null, c: number, r: number, o?: { shell?: string }) => {
+      seen.push(sid === null ? o?.shell : `session:${sid}`);
+      return open(sid, c, r, o);
+    };
+    (window as unknown as { __seen: unknown[] }).__seen = seen;
+    return seen;
+  });
+  expect(shells).toEqual([]);
+  await page.getByRole("button", { name: "이 칸에 새 탭 (로컬 셸)" }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __seen: unknown[] }).__seen)).toEqual(["wsl.exe -d Ubuntu-24.04"]);
 });
 
 test("탭을 휠 클릭하면 닫는다", async ({ page }) => {

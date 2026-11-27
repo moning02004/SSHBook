@@ -46,6 +46,8 @@ export function SftpPanel({ paneId, onClose }: Props) {
   /** 진행 중인 전송(한 번에 하나) */
   const [transfer, setTransfer] = useState<{ id: string; label: string; p: SftpProgress | null } | null>(null);
   const [uploadMenu, setUploadMenu] = useState(false);
+  /** 목록 안에서 이름을 입력하는 중(새 폴더 · 이름 바꾸기). 맥 웹뷰는 window.prompt를 지원하지 않는다. */
+  const [naming, setNaming] = useState<{ kind: "mkdir" } | { kind: "rename"; from: string } | null>(null);
   const panel = useRef<HTMLDivElement>(null);
 
   // 진행률 이벤트는 지금 전송 것만 받는다.
@@ -161,22 +163,54 @@ export function SftpPanel({ paneId, onClose }: Props) {
 
   const open = (e: RemoteEntry) => (e.isDir || e.isLink ? void load(joinPath(path, e.name)) : void download(e));
 
-  const mkdir = async () => {
-    const name = window.prompt(tx("새 폴더 이름"));
-    if (!name?.trim() || !termId) return;
+  const mkdir = async (name: string) => {
+    if (!name.trim() || !termId) return;
     await act(tx("폴더 만드는 중"), async () => {
       await api.sftpMkdir(termId, joinPath(path, name.trim()));
       await load(path);
     });
   };
 
-  const rename = async (e: RemoteEntry) => {
-    const name = window.prompt(tx("새 이름"), e.name);
-    if (!name?.trim() || name === e.name || !termId) return;
+  const rename = async (from: string, name: string) => {
+    if (!name.trim() || name.trim() === from || !termId) return;
     await act(tx("이름 바꾸는 중"), async () => {
-      await api.sftpRename(termId, joinPath(path, e.name), joinPath(path, name.trim()));
+      await api.sftpRename(termId, joinPath(path, from), joinPath(path, name.trim()));
       await load(path);
     });
+  };
+
+  /** 목록 안 이름 입력칸. Enter·초점 이동은 적용, Esc는 취소. 한글 조합 중 Enter는 글자 확정에 쓴다. */
+  const nameInput = (initial: string, label: string, apply: (name: string) => void) => {
+    let done = false;
+    const finish = (value: string | null) => {
+      if (done) return;
+      done = true;
+      setNaming(null);
+      if (value !== null) apply(value);
+    };
+    return (
+      <input
+        className="input sftp-name-input"
+        aria-label={label}
+        defaultValue={initial}
+        autoFocus
+        spellCheck={false}
+        onFocus={(ev) => {
+          // 이름 바꾸기는 확장자 앞까지만 고른다.
+          const dot = initial.lastIndexOf(".");
+          ev.currentTarget.setSelectionRange(0, dot > 0 ? dot : initial.length);
+        }}
+        onClick={(ev) => ev.stopPropagation()}
+        onDoubleClick={(ev) => ev.stopPropagation()}
+        onKeyDown={(ev) => {
+          ev.stopPropagation();
+          if (ev.nativeEvent.isComposing || ev.keyCode === 229) return;
+          if (ev.key === "Enter") finish(ev.currentTarget.value);
+          if (ev.key === "Escape") finish(null);
+        }}
+        onBlur={(ev) => finish(ev.currentTarget.value)}
+      />
+    );
   };
 
   const remove = async (e: RemoteEntry) => {
@@ -232,7 +266,7 @@ export function SftpPanel({ paneId, onClose }: Props) {
         <button className="icon-btn ghost sm" title={tx("터미널의 지금 폴더로")} aria-label={tx("터미널의 지금 폴더로")} disabled={!termId || busy} onClick={() => void goTerminalDir(true)}>
           <IconTarget width={14} height={14} />
         </button>
-        <button className="icon-btn ghost sm" title={tx("새 폴더")} aria-label={tx("새 폴더")} disabled={!termId || busy} onClick={() => void mkdir()}>
+        <button className="icon-btn ghost sm" title={tx("새 폴더")} aria-label={tx("새 폴더")} disabled={!termId || busy} onClick={() => setNaming({ kind: "mkdir" })}>
           <IconFolderPlus width={14} height={14} />
         </button>
         <span className="upload-wrap">
@@ -283,7 +317,13 @@ export function SftpPanel({ paneId, onClose }: Props) {
           </form>
 
           <ul className="sftp-list" role="listbox" aria-label={tx("{0} 안의 파일", path)} aria-busy={busy}>
-            {entries.length === 0 && !busy && <li className="sftp-empty">{tx("빈 폴더입니다.")}</li>}
+            {naming?.kind === "mkdir" && (
+              <li className="sftp-row selected naming">
+                <IconFolder width={14} height={14} className="ic dir" />
+                {nameInput("", tx("새 폴더 이름"), (n) => void mkdir(n))}
+              </li>
+            )}
+            {entries.length === 0 && !busy && naming?.kind !== "mkdir" && <li className="sftp-empty">{tx("빈 폴더입니다.")}</li>}
             {entries.map((e) => (
               <li
                 key={e.name}
@@ -297,15 +337,21 @@ export function SftpPanel({ paneId, onClose }: Props) {
                 title={e.isDir ? tx("더블클릭: 열기") : tx("더블클릭: 내려받기")}
               >
                 {e.isDir ? <IconFolder width={14} height={14} className="ic dir" /> : <IconFile width={14} height={14} className="ic" />}
-                <span className="nm">{e.name}{e.isLink ? " →" : ""}</span>
-                <span className="meta">{e.isDir ? when(e.mtime) : humanSize(e.size)}</span>
+                {naming?.kind === "rename" && naming.from === e.name ? (
+                  nameInput(e.name, tx("새 이름"), (n) => void rename(e.name, n))
+                ) : (
+                  <>
+                    <span className="nm">{e.name}{e.isLink ? " →" : ""}</span>
+                    <span className="meta">{e.isDir ? when(e.mtime) : humanSize(e.size)}</span>
+                  </>
+                )}
                 <span className="row-actions">
                   {!e.isLink && (
                     <button className="icon-btn ghost xs" title={e.isDir ? tx("폴더째 내려받기") : tx("내려받기")} aria-label={tx("{0} 내려받기", e.name)} disabled={!!transfer} onClick={(ev) => { ev.stopPropagation(); void download(e); }}>
                       <IconDownload width={12} height={12} />
                     </button>
                   )}
-                  <button className="icon-btn ghost xs" title={tx("이름 바꾸기")} aria-label={tx("{0} 이름 바꾸기", e.name)} onClick={(ev) => { ev.stopPropagation(); void rename(e); }}>
+                  <button className="icon-btn ghost xs" title={tx("이름 바꾸기")} aria-label={tx("{0} 이름 바꾸기", e.name)} onClick={(ev) => { ev.stopPropagation(); setNaming({ kind: "rename", from: e.name }); }}>
                     <IconEdit width={12} height={12} />
                   </button>
                   <button className="icon-btn ghost xs danger" title={tx("지우기")} aria-label={tx("{0} 지우기", e.name)} onClick={(ev) => { ev.stopPropagation(); void remove(e); }}>

@@ -92,6 +92,15 @@ export interface OpenOptions {
   passphrase?: string;
   /** 접속 중 서버가 묻는 OTP 같은 질문을 이 창으로 돌려받기 위한 표시 */
   promptKey?: string;
+  /** 세션 없이 여는 로컬 셸의 셸 명령(설정의 기본 로컬 셸). 비우면 OS 기본 */
+  shell?: string;
+}
+
+/** 이 PC에서 고를 수 있는 셸 */
+export interface ShellChoice {
+  label: string;
+  /** 셸 칸에 넣는 명령(인자 포함, 예: wsl.exe -d Ubuntu) */
+  command: string;
 }
 
 /** 접속 중 서버의 질문(keyboard-interactive). 문구는 제어 문자를 뺀 값이다. */
@@ -220,6 +229,8 @@ export interface Backend {
   clipboardWrite(text: string): Promise<void>;
   /** 앱 안에서 내려받아 설치할 수 있는 글꼴 이름 */
   fontsInstallable(): Promise<string[]>;
+  /** 이 PC에서 고를 수 있는 셸(cmd, PowerShell, WSL 배포판, /etc/shells …) */
+  localShells(): Promise<ShellChoice[]>;
   /** 글꼴을 내려받아 이 사용자 계정에 설치한다 */
   fontInstall(family: string): Promise<void>;
   onTermData(cb: (e: TermData) => void): Promise<() => void>;
@@ -267,7 +278,7 @@ const tauriBackend: Backend = {
   sftpRemove: (id, path, isDir) => invoke("sftp_remove", { id, path, isDir }),
   sftpRename: (id, from, to) => invoke("sftp_rename", { id, from, to }),
   termOpen: (sessionId, cols, rows, opts) =>
-    invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null, user: opts?.user ?? null, promptKey: opts?.promptKey ?? null }),
+    invoke("term_open", { sessionId, cols, rows, password: opts?.password ?? null, passphrase: opts?.passphrase ?? null, user: opts?.user ?? null, promptKey: opts?.promptKey ?? null, shell: opts?.shell ?? null }),
   termAuthAnswer: (id, answers) => invoke("term_auth_answer", { id, answers }),
   onAuthPrompt: (cb) => listen<AuthPrompt>("term-auth-prompt", (e) => cb(e.payload)),
   sshConfigHosts: () => invoke("ssh_config_hosts"),
@@ -281,6 +292,7 @@ const tauriBackend: Backend = {
   termRevealCwd: (id, hint) => invoke("term_reveal_cwd", { id, hint }),
   clipboardWrite: (text) => invoke("clipboard_write", { text }),
   fontsInstallable: () => invoke("fonts_installable"),
+  localShells: () => invoke("local_shells"),
   fontInstall: (family) => invoke("font_install", { family }),
   onTermData: (cb) => listen<TermData>("term-data", (e) => cb(e.payload)),
   onTermExit: (cb) => listen<TermExit>("term-exit", (e) => cb(e.payload)),
@@ -578,6 +590,13 @@ function createMockBackend(): Backend {
     },
     async clipboardWrite(text) {
       await navigator.clipboard.writeText(text);
+    },
+    async localShells() {
+      return [
+        { label: "Git Bash", command: '"C:\\Program Files\\Git\\bin\\bash.exe" --login -i' },
+        { label: "zsh", command: "/bin/zsh" },
+        { label: "WSL: Ubuntu-24.04", command: "wsl.exe -d Ubuntu-24.04" },
+      ];
     },
     async fontsInstallable() {
       return ["D2Coding", "JetBrains Mono", "Fira Code", "Source Code Pro"];

@@ -632,9 +632,14 @@ fn plan_for(
     password: Option<String>,
     passphrase: Option<String>,
     user: Option<String>,
+    default_shell: Option<String>,
 ) -> CmdResult<Plan> {
+    // 세션 없이 여는 로컬 셸은 설정의 '기본 로컬 셸'을 쓴다(비우면 OS 기본).
     let Some(sid) = session_id else {
-        return Ok(Plan::Local { shell: None, cwd: None });
+        return Ok(Plan::Local {
+            shell: default_shell,
+            cwd: None,
+        });
     };
     let guard = lock(&state.vault);
     let v = guard.as_ref().ok_or(LOCKED)?;
@@ -713,10 +718,11 @@ async fn term_open(
     passphrase: Option<String>,
     user: Option<String>,
     prompt_key: Option<String>,
+    shell: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let generation = state.lock_generation.load(Ordering::SeqCst);
-    let plan = plan_for(&app, &state, session_id, password, passphrase, user).inspect_err(|e| {
+    let plan = plan_for(&app, &state, session_id, password, passphrase, user, shell).inspect_err(|e| {
         // 사용자를 묻는 것은 정상 흐름이라 남기지 않는다.
         if !e.starts_with("ask:") {
             applog::warn(&format!("연결 준비 실패: {e}"))
@@ -909,6 +915,14 @@ fn clipboard_write(text: String) -> CmdResult<()> {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set_text(text))
         .map_err(|e| format!("클립보드에 넣지 못했습니다: {e}"))
+}
+
+/// 이 PC에서 고를 수 있는 셸(cmd, PowerShell, WSL 배포판, /etc/shells …)
+#[tauri::command]
+async fn local_shells() -> Vec<pty::ShellChoice> {
+    tauri::async_runtime::spawn_blocking(pty::available_shells)
+        .await
+        .unwrap_or_default()
 }
 
 /// 앱 안에서 설치할 수 있는 글꼴 이름
@@ -1244,6 +1258,7 @@ pub fn run() {
             term_reveal_cwd,
             clipboard_write,
             fonts_installable,
+            local_shells,
             font_install,
             term_auth_answer,
             app_set_language,
