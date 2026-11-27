@@ -269,7 +269,13 @@ pub struct VaultData {
     /// 사이드바를 사용자가 끌어서 정한 순서로 보여 준다(sessions·groups 순서). 아니면 가나다순.
     #[serde(default)]
     pub manual_order: bool,
+    /// 내보낸 파일에만 넣는 앱 설정(글꼴·테마·언어 등, JSON). 가져온 PC가 읽어서 적용한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_settings: Option<String>,
 }
+
+/// 내보내는 앱 설정의 최대 크기
+pub const APP_SETTINGS_MAX: usize = 64 * 1024;
 
 /// 사이드바에서 세션 하나의 자리: 순서대로 늘어놓은 세션과 그 그룹
 #[derive(Deserialize, Debug, Clone)]
@@ -560,17 +566,31 @@ impl OpenVault {
 
     /// 지금 내용을 다른 비밀번호로 잠근 파일로 내보낸다(이 보관함은 그대로).
     /// 마스터 비밀번호 없이 쓸 때: 다른 PC에는 이 PC의 열쇠 파일이 없기 때문이다.
-    pub fn export_with_password(&self, dest: &Path, password: &str) -> Result<()> {
+    pub fn export_with_password(&self, dest: &Path, password: &str, app_settings: Option<String>) -> Result<()> {
         if same_file(dest, &self.path) {
             return Err(VaultError::SameFile);
         }
         let salt = random::<SALT_LEN>()?.to_vec();
+        let key = derive_key(password, &salt, self.params)?;
+        self.write_copy(dest, key, salt, app_settings)
+    }
+
+    /// 이 보관함의 내용(+앱 설정)을 dest에 주어진 키로 잠가 쓴다.
+    fn write_copy(
+        &self,
+        dest: &Path,
+        key: Zeroizing<[u8; 32]>,
+        salt: Vec<u8>,
+        app_settings: Option<String>,
+    ) -> Result<()> {
+        let mut data = self.data.clone();
+        data.app_settings = app_settings.filter(|s| s.len() <= APP_SETTINGS_MAX);
         let copy = OpenVault {
             path: dest.to_path_buf(),
-            key: derive_key(password, &salt, self.params)?,
+            key,
             params: self.params,
             salt,
-            data: self.data.clone(),
+            data,
         };
         // 임시 파일에 쓴 뒤 바꿔치기해서, 실패해도 그 자리의 파일이 깨지지 않게 한다.
         let mut tmp = dest.as_os_str().to_owned();
@@ -600,13 +620,14 @@ impl OpenVault {
     }
 
     /// 지금 내용을 저장한 뒤 파일을 그대로 복사한다. 내보낸 파일도 같은 비밀번호로 잠겨 있다.
-    pub fn export_to(&self, dest: &Path) -> Result<()> {
+    /// 같은 마스터 비밀번호로 잠근 사본을 내보낸다. 앱 설정도 함께 넣는다.
+    pub fn export_to(&self, dest: &Path, app_settings: Option<String>) -> Result<()> {
         self.save()?;
-        // 다른 경로 표기(심볼릭 링크 등)로 자기 자신에 복사하면 파일이 비워질 수 있다.
-        if !same_file(dest, &self.path) {
-            fs::copy(&self.path, dest)?;
+        // 다른 경로 표기(심볼릭 링크 등)로 자기 자신에 쓰면 보관함이 바뀔 수 있다.
+        if same_file(dest, &self.path) {
+            return Ok(());
         }
-        Ok(())
+        self.write_copy(dest, self.key.clone(), self.salt.clone(), app_settings)
     }
 }
 
@@ -927,7 +948,7 @@ mod tests {
 
         // 내보내기는 받은 비밀번호로 잠기고, 이 보관함은 그대로다.
         let out = tmp_path("export.sshv");
-        v.export_with_password(&out, "for other pc").unwrap();
+        v.export_with_password(&out, "for other pc", None).unwrap();
         assert_eq!(OpenVault::open(&out, "for other pc").unwrap().data.sessions.len(), 1);
         assert!(OpenVault::open(&out, "random-secret").is_err());
         assert!(OpenVault::open(&path, "random-secret").is_ok());
@@ -957,16 +978,16 @@ mod tests {
         let path = tmp_path("vault.sshv");
         let v = OpenVault::create(&path, "correct horse", FAST).unwrap();
         assert!(matches!(
-            v.export_with_password(&path, "other pw 1"),
+            v.export_with_password(&path, "other pw 1", None),
             Err(VaultError::SameFile)
         ));
         // 같은 파일을 다른 표기로 가리켜도 막는다.
         let dotted = path.parent().unwrap().join(".").join("vault.sshv");
         assert!(matches!(
-            v.export_with_password(&dotted, "other pw 1"),
+            v.export_with_password(&dotted, "other pw 1", None),
             Err(VaultError::SameFile)
         ));
-        v.export_to(&dotted).unwrap();
+        v.export_to(&dotted, None).unwrap();
         assert!(OpenVault::open(&path, "correct horse").is_ok());
     }
 
@@ -1067,12 +1088,28 @@ mod tests {
         let path = tmp_path("vault.sshv");
         let mut v = OpenVault::create(&path, "pw-12345678", FAST).unwrap();
         v.data.sessions.push(sample_session("s1"));
-        let exported = tmp_path("exported.sshv");
-        v.export_to(&exported).unwrap();
+        v.data.groups.push(Group {
+            name: "운영".into(),
+            color: Some("red".into()),
+        });
+        let exported = tmp_path("book_settings.sshbook");
+        v.export_to(&exported, Some(r#"{"settings":{"fontSize":15}}"#.into()))
+            .unwrap();
+        // 내 보관함에는 앱 설정을 남기지 않는다.
+        assert!(OpenVault::open(&path, "pw-12345678")
+            .unwrap()
+            .data
+            .app_settings
+            .is_none());
 
         let other_pc = tmp_path("vault.sshv");
         let imported = import(&exported, &other_pc, "pw-12345678").unwrap();
         assert_eq!(imported.data.sessions[0].name, "prod-web-01");
+        assert_eq!(imported.data.groups[0].color.as_deref(), Some("red"));
+        assert_eq!(
+            imported.data.app_settings.as_deref(),
+            Some(r#"{"settings":{"fontSize":15}}"#)
+        );
         assert!(import(&exported, &other_pc, "wrong").is_err());
     }
 

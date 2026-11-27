@@ -210,17 +210,39 @@ async fn vault_change_password(
 
 /// 보관함 파일 내보내기. 마스터 비밀번호 없이 쓰는 중이면 내보낼 파일의 비밀번호가 필요하다.
 #[tauri::command]
-async fn vault_export(state: State<'_, AppState>, dest: String, password: Option<String>) -> CmdResult<()> {
+async fn vault_export(
+    state: State<'_, AppState>,
+    dest: String,
+    password: Option<String>,
+    app_settings: Option<String>,
+) -> CmdResult<()> {
     let password = password.map(Zeroizing::new);
+    if app_settings.as_ref().is_some_and(|s| s.len() > vault::APP_SETTINGS_MAX) {
+        return Err("설정이 너무 커서 내보낼 수 없습니다.".into());
+    }
     let guard = lock(&state.vault);
     let v = guard.as_ref().ok_or(LOCKED)?;
     let dest = PathBuf::from(dest);
     if nopass::is_on(v.path()) {
         let pw = password.filter(|p| p.chars().count() >= 8);
         let pw = pw.ok_or("내보낼 파일의 비밀번호(8자 이상)가 필요합니다.")?;
-        return v.export_with_password(&dest, &pw).map_err(|e| e.to_string());
+        return v
+            .export_with_password(&dest, &pw, app_settings)
+            .map_err(|e| e.to_string());
     }
-    v.export_to(&dest).map_err(|e| e.to_string())
+    v.export_to(&dest, app_settings).map_err(|e| e.to_string())
+}
+
+/// 가져온 보관함에 들어 있던 앱 설정을 한 번 꺼낸다(꺼낸 뒤에는 보관함에서 지운다).
+#[tauri::command]
+fn vault_take_app_settings(state: State<'_, AppState>) -> CmdResult<Option<String>> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let taken = v.data.app_settings.take();
+    if taken.is_some() {
+        v.save().map_err(|e| e.to_string())?;
+    }
+    Ok(taken)
 }
 
 #[tauri::command]
@@ -1295,6 +1317,7 @@ pub fn run() {
             clipboard_write,
             fonts_installable,
             local_shells,
+            vault_take_app_settings,
             term_drop_text,
             sidebar_manual,
             sidebar_reorder,

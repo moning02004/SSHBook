@@ -457,6 +457,10 @@ function detachGpuRenderer(e: PaneEntry) {
 }
 
 let linkErrorHandler: (message: string) => void = () => {};
+/** 터미널 링크를 기본 브라우저로 연다(http·https만, 백엔드가 다시 확인한다). */
+function openLink(uri: string) {
+  void api.openUrl(uri).catch((err) => linkErrorHandler(String(err)));
+}
 /** 링크를 열지 못했을 때 알릴 곳(앱의 알림줄) */
 export function setLinkErrorHandler(fn: (message: string) => void) {
   linkErrorHandler = fn;
@@ -480,6 +484,14 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     theme: terminalThemes[currentTheme],
     // 마우스를 쓰는 프로그램(Claude Code·tmux·vim) 안에서도 Shift(맥은 Option)를 누른 채 끌면 직접 고른다.
     macOptionClickForcesSelection: true,
+    // 글자 뒤에 숨은 링크(OSC 8, Claude Code·ls --hyperlink 등). 기본 동작은 window.open이라 앱 창에서는 열리지 않는다.
+    linkHandler: {
+      allowNonHttpProtocols: false,
+      activate: (ev, uri) => {
+        ev.preventDefault();
+        openLink(uri);
+      },
+    },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -489,7 +501,7 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
   term.loadAddon(
     new WebLinksAddon((ev, uri) => {
       ev.preventDefault();
-      void api.openUrl(uri).catch((err) => linkErrorHandler(String(err)));
+      openLink(uri);
     }),
   );
   term.attachCustomKeyEventHandler((e) => {

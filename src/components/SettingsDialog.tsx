@@ -361,7 +361,7 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
                 <div className="row-gap" style={{ alignItems: "center" }}>
                   <IconUnlock style={{ color: "var(--ok)", flex: "none" }} />
                   <span style={{ flex: 1, fontWeight: 500 }}>{passwordless ? tx("비밀번호 없이 사용 중") : tx("열려 있음")}</span>
-                  <button className="btn" title={tx("다른 PC로 옮길 보관함 파일 내보내기")} onClick={() => (passwordless ? setSub("export") : onExport())}>
+                  <button className="btn" title={tx("다른 PC로 옮길 파일 내보내기 (세션·그룹·키·설정을 모두 담는다)")} onClick={() => (passwordless ? setSub("export") : onExport())}>
                     <IconExport width={14} height={14} />{" "}{tx("내보내기")}
                   </button>
                   {!passwordless && (

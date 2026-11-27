@@ -1,4 +1,5 @@
-import { tx } from "./i18n";
+import { savedLanguage, saveLanguage, tx, type Language } from "./i18n";
+import { applyTheme, loadTheme, type ThemeName } from "./theme";
 // 이 PC에만 기억하는 앱 설정. 보관함과 상관없고, 바꾸면 열린 터미널에 바로 적용된다.
 
 export type CursorStyle = "block" | "bar" | "underline";
@@ -161,4 +162,37 @@ export function isFontInstalled(name: string): boolean {
   } catch {
     return true;
   }
+}
+
+// ---- 다른 PC로 옮기기 ----
+
+/** 내보내는 파일에 함께 넣는 앱 설정 */
+interface AppSettingsBundle {
+  version: 1;
+  settings: Settings;
+  theme: ThemeName;
+  language: Language;
+}
+
+/** 지금 앱 설정(설정 창의 값, 테마, 언어)을 JSON으로 */
+export function exportAppSettings(): string {
+  const bundle: AppSettingsBundle = { version: 1, settings: current, theme: loadTheme(), language: savedLanguage() };
+  return JSON.stringify(bundle);
+}
+
+/**
+ * 가져온 앱 설정을 적용한다. 알 수 없는 값은 기본값으로 바꾼다.
+ * 돌려주는 값: 적용한 테마(없으면 null), 언어가 바뀌었는지(다시 켜야 적용된다).
+ */
+export function importAppSettings(json: string): { theme: ThemeName | null; languageChanged: boolean } {
+  const b = JSON.parse(json) as Partial<AppSettingsBundle>;
+  if (b && typeof b.settings === "object" && b.settings) updateSettings(normalize(b.settings));
+  const theme = b.theme === "dark" || b.theme === "light" ? b.theme : null;
+  if (theme) applyTheme(theme);
+  let languageChanged = false;
+  if ((b.language === "ko" || b.language === "en") && b.language !== savedLanguage()) {
+    saveLanguage(b.language);
+    languageChanged = true;
+  }
+  return { theme, languageChanged };
 }

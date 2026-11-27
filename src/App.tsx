@@ -17,7 +17,7 @@ import { VaultScreen } from "./components/VaultScreen";
 import { tabTitle, Workspace, type PaneInfo } from "./components/Workspace";
 import { api, errorText, inTauri, type SecretInput, type VaultStatus } from "./lib/api";
 import { loadFlag, saveFlag, SIDEBAR_HIDDEN } from "./lib/prefs";
-import { bumpFontSize, DEFAULT_SETTINGS, updateSettings } from "./lib/settings";
+import { bumpFontSize, DEFAULT_SETTINGS, exportAppSettings, importAppSettings, updateSettings } from "./lib/settings";
 import { pickExportPath } from "./lib/dialogs";
 import { sideAt, type DropSide, type SplitDir } from "./lib/layout";
 import * as desks from "./lib/groups";
@@ -746,12 +746,25 @@ export function App() {
     await refresh();
   };
 
+  // 다른 PC에서 내보낸 파일을 가져왔으면 그 파일의 앱 설정(글꼴·테마·언어 등)을 적용한다.
+  const applyImportedSettings = async () => {
+    try {
+      const json = await api.vaultTakeAppSettings();
+      if (!json) return;
+      const r = importAppSettings(json);
+      if (r.theme) setTheme(r.theme);
+      setNotice(r.languageChanged ? tx("가져온 설정을 적용했습니다. 언어는 앱을 다시 켜면 바뀝니다.") : tx("가져온 설정을 적용했습니다."));
+    } catch (e) {
+      setNotice(tx("가져온 설정을 적용하지 못했습니다: {0}", errorText(e)));
+    }
+  };
+
   const exportVault = async (password?: string) => {
     try {
       const dest = await pickExportPath();
       if (!dest) return;
-      await api.vaultExport(dest, password);
-      setNotice(tx("보관함 파일을 내보냈습니다: {0}", dest));
+      await api.vaultExport(dest, password, exportAppSettings());
+      setNotice(tx("세션·그룹·설정을 내보냈습니다: {0}", dest));
     } catch (e) {
       setNotice(tx("내보내지 못했습니다: {0}", errorText(e)));
     }
@@ -837,7 +850,16 @@ export function App() {
   // ---- 화면 ----
 
   if (!status) return <Splash />;
-  if (!status.unlocked) return <VaultScreen status={status} onOpened={refresh} />;
+  if (!status.unlocked)
+    return (
+      <VaultScreen
+        status={status}
+        onOpened={async () => {
+          await refresh();
+          await applyImportedSettings();
+        }}
+      />
+    );
 
   const activeInfo = activeId ? panes[activeId] : null;
 

@@ -676,6 +676,69 @@ test("셸 출력의 링크를 누르면 브라우저로 연다", async ({ page }
     .toEqual(["https://example.com/docs?a=1&b=2"]);
 });
 
+test("마우스를 쓰는 프로그램(Claude Code) 안의 숨은 링크(OSC 8)와 글자 링크도 브라우저로 연다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  await page.keyboard.type("osc8");
+  await page.keyboard.press("Enter");
+  const row = page.locator(".xterm-rows").last().locator("> div", { hasText: "Sign in here" });
+  await expect(row).toBeVisible();
+  const clickOn = async (text: string, fromRight: boolean) => {
+    const span = row.locator("span", { hasText: text }).first();
+    const r = (await span.boundingBox())!;
+    const x = fromRight ? r.x + r.width - 12 : r.x + 12;
+    const y = r.y + r.height / 2;
+    await page.mouse.move(x - 4, y);
+    await page.mouse.move(x, y);
+    await page.mouse.click(x, y);
+  };
+  const opened = () => page.evaluate(() => (window as unknown as { __openedUrls?: string[] }).__openedUrls ?? []);
+  await clickOn("Sign in here", false);
+  await expect.poll(opened).toEqual(["https://claude.ai/login?code=abc"]);
+  await clickOn("example.com/plain", true);
+  await expect.poll(opened).toEqual(["https://claude.ai/login?code=abc", "https://example.com/plain"]);
+});
+
+test("내보낸 book_settings.sshbook에 세션·그룹·설정이 함께 담기고, 가져오면 설정도 적용된다", async ({ page }) => {
+  await createVault(page);
+  const openSettings = async (tab: string) => {
+    await page.getByRole("button", { name: "설정", exact: true }).click();
+    await page.getByRole("tab", { name: tab }).click();
+  };
+  const rightClick = page.getByRole("checkbox", { name: /오른쪽 클릭으로 붙여넣기/ });
+  await openSettings("터미널");
+  const before = await rightClick.isChecked();
+  await rightClick.setChecked(!before);
+
+  // 내보내기: 처음 보이는 이름은 book_settings.sshbook(바꿀 수 있다)
+  let suggested = "";
+  page.once("dialog", (d) => {
+    suggested = d.defaultValue();
+    void d.accept("내설정.sshbook");
+  });
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "내보내기", exact: true }).click();
+  await expect(page.getByText("세션·그룹·설정을 내보냈습니다: 내설정.sshbook")).toBeVisible();
+  expect(suggested).toBe("book_settings.sshbook");
+  const exported = await page.evaluate(() => (window as unknown as { __lastExport: { appSettings: string } }).__lastExport.appSettings);
+  expect(JSON.parse(exported).settings.rightClickPaste).toBe(!before);
+
+  // 다른 PC라고 치고 설정을 되돌린 뒤 잠그고, 그 파일을 가져온다.
+  if (!(await page.getByRole("tab", { name: "터미널" }).isVisible())) await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "터미널" }).click();
+  await rightClick.setChecked(before);
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "잠그기", exact: true }).click();
+  await page.getByRole("button", { name: "다른 PC의 보관함 파일 가져오기" }).click();
+  page.once("dialog", (d) => void d.accept("내설정.sshbook"));
+  await page.getByRole("button", { name: "파일 선택" }).click();
+  await page.locator('input[type="password"]').fill(MASTER);
+  await page.locator(".vault-card button.primary").click();
+  await expect(page.getByText("가져온 설정을 적용했습니다.")).toBeVisible();
+  await openSettings("터미널");
+  await expect(rightClick).toBeChecked({ checked: !before });
+});
+
 test("로컬 셸에 파일을 끌어다 놓으면 경로를 넣는다", async ({ page }) => {
   await createVault(page);
   await openLocal(page);

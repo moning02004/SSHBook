@@ -2,7 +2,9 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { inTauri } from "./api";
 import { tx } from "./i18n";
 
-const VAULT_FILTER = [{ name: tx("SSHBook 보관함"), extensions: ["sshv"] }];
+const VAULT_FILTER = [{ name: tx("SSHBook 설정·보관함"), extensions: ["sshbook", "sshv"] }];
+/** 내보낼 때 처음 보이는 파일 이름(바꿀 수 있다) */
+export const EXPORT_DEFAULT_NAME = "book_settings.sshbook";
 
 export async function pickKeyFile(): Promise<string | null> {
   if (!inTauri) return window.prompt(tx("개인 키 파일 경로"), "~/.ssh/id_ed25519");
@@ -11,14 +13,17 @@ export async function pickKeyFile(): Promise<string | null> {
 }
 
 export async function pickVaultToImport(): Promise<string | null> {
-  if (!inTauri) return window.prompt(tx("보관함 파일 경로"), "vault.sshv");
+  if (!inTauri) return window.prompt(tx("보관함 파일 경로"), EXPORT_DEFAULT_NAME);
   const r = await open({ title: tx("보관함 파일 가져오기"), multiple: false, directory: false, filters: VAULT_FILTER });
   return typeof r === "string" ? r : null;
 }
 
 export async function pickExportPath(): Promise<string | null> {
-  if (!inTauri) return window.prompt(tx("내보낼 경로"), "vault.sshv");
-  return save({ title: tx("보관함 파일 내보내기"), defaultPath: "vault.sshv", filters: VAULT_FILTER });
+  if (!inTauri) return window.prompt(tx("내보낼 경로"), EXPORT_DEFAULT_NAME);
+  const r = await save({ title: tx("세션·그룹·설정 내보내기"), defaultPath: EXPORT_DEFAULT_NAME, filters: [{ name: tx("SSHBook 설정"), extensions: ["sshbook"] }] });
+  if (!r) return null;
+  // 확장자를 지웠으면 붙인다.
+  return /\.(sshbook|sshv)$/i.test(r) ? r : `${r}.sshbook`;
 }
 
 /** 내려받을 파일을 저장할 곳 */

@@ -163,7 +163,10 @@ export interface Backend {
   vaultLock(): Promise<void>;
   vaultChangePassword(oldPassword: string, newPassword: string): Promise<void>;
   /** password: 마스터 비밀번호 없이 쓰는 중일 때 내보낼 파일의 비밀번호 */
-  vaultExport(dest: string, password?: string): Promise<void>;
+  /** 보관함(세션·그룹·키)과 앱 설정(appSettings, JSON)을 한 파일로 내보낸다 */
+  vaultExport(dest: string, password?: string, appSettings?: string): Promise<void>;
+  /** 가져온 파일에 들어 있던 앱 설정을 한 번 꺼낸다(없으면 null) */
+  vaultTakeAppSettings(): Promise<string | null>;
   vaultImport(src: string, password: string): Promise<void>;
   /** 보관함 자동 백업 목록(새것부터) */
   vaultBackups(): Promise<VaultBackup[]>;
@@ -255,7 +258,8 @@ const tauriBackend: Backend = {
   vaultEnablePassword: (password) => invoke("vault_enable_password", { password }),
   vaultLock: () => invoke("vault_lock"),
   vaultChangePassword: (oldPassword, newPassword) => invoke("vault_change_password", { oldPassword, newPassword }),
-  vaultExport: (dest, password) => invoke("vault_export", { dest, password: password ?? null }),
+  vaultExport: (dest, password, appSettings) => invoke("vault_export", { dest, password: password ?? null, appSettings: appSettings ?? null }),
+  vaultTakeAppSettings: () => invoke("vault_take_app_settings"),
   vaultImport: (src, password) => invoke("vault_import", { src, password }),
   vaultBackups: () => invoke("vault_backups"),
   vaultRestore: (backup, password) => invoke("vault_restore", { backup, password }),
@@ -319,6 +323,9 @@ function createMockBackend(): Backend {
   let passwordless = false;
   let groups: Group[] = [];
   let manualOrder = false;
+  // 미리보기: 내보낸 파일의 앱 설정과, 가져온 뒤 아직 적용하지 않은 앱 설정
+  let exportedSettings: string | null = null;
+  let pendingSettings: string | null = null;
   let snippets: Snippet[] = [
     { id: "s1", name: "도커 로그", command: "docker compose logs -f --tail=200 api" },
     { id: "s2", name: "디스크 사용량", command: "df -h" },
@@ -407,8 +414,17 @@ function createMockBackend(): Backend {
       await wait();
       if (oldPassword !== "test1234") throw "지금 마스터 비밀번호가 맞지 않습니다.";
     },
-    async vaultExport() {},
+    async vaultExport(dest, _password, appSettings) {
+      exportedSettings = appSettings ?? null;
+      (window as unknown as { __lastExport?: unknown }).__lastExport = { dest, appSettings };
+    },
+    async vaultTakeAppSettings() {
+      const s = pendingSettings;
+      pendingSettings = null;
+      return s;
+    },
     async vaultImport() {
+      pendingSettings = exportedSettings;
       exists = true;
       unlocked = true;
     },
@@ -608,6 +624,9 @@ function createMockBackend(): Backend {
         // 미리보기: 터미널 안 프로그램이 클립보드에 복사하는 것(OSC 52)을 흉내 낸다.
         // 미리보기: 링크가 든 출력
         if (line === "link") return emit(id, "\r\nhttps://example.com/docs?a=1&b=2\r\n$ ");
+        // 미리보기: Claude Code처럼 마우스 추적을 켜고, 글자 뒤에 링크를 숨긴(OSC 8) 출력
+        if (line === "osc8")
+          return emit(id, "\x1b[?1000h\x1b[?1006h\r\n\x1b]8;;https://claude.ai/login?code=abc\x07Sign in here\x1b]8;;\x07  https://example.com/plain\r\n$ ");
         if (line === "osc52") return emit(id, `\x1b]52;c;${btoa("copied by app")}\x07\r\n$ `);
         return emit(id, "\r\n$ ");
       }
