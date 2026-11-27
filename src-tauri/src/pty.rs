@@ -49,11 +49,7 @@ pub fn shell_kind(prog: &str, windows: bool) -> ShellKind {
         return ShellKind::Posix;
     }
     let p = prog.trim_matches('"');
-    let stem = std::path::Path::new(p)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    match stem.as_str() {
+    match program_stem(p).as_str() {
         "cmd" => ShellKind::Cmd,
         "powershell" | "pwsh" => ShellKind::PowerShell,
         "wsl" => ShellKind::Wsl,
@@ -205,11 +201,18 @@ impl DataPump {
 /// Windows는 다른 프로세스의 지금 폴더를 바로 읽을 수 없고, PowerShell은 `cd`해도
 /// 프로세스 폴더가 바뀌지 않아서 셸이 직접 알려 주는 값을 쓴다.
 #[cfg(windows)]
+/// 프로그램 이름(소문자, 폴더·확장자 없이). `/`와 `\` 둘 다 폴더 구분으로 본다(어느 OS에서 돌든 같게).
+fn program_stem(prog: &str) -> String {
+    let file = prog.trim_matches('"').rsplit(['/', '\\']).next().unwrap_or("");
+    let stem = match file.rfind('.') {
+        Some(i) if i > 0 => &file[..i],
+        _ => file,
+    };
+    stem.to_lowercase()
+}
+
 fn add_cwd_reporting(cmd: &mut CommandBuilder, prog: &str) {
-    let name = std::path::Path::new(prog.trim_matches('"'))
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    let name = program_stem(prog);
     match name.as_str() {
         "cmd" => {
             let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
@@ -474,9 +477,7 @@ pub fn msys_to_windows(p: &str) -> String {
 /// 프로그램 이름이 WSL인지(wsl, wsl.exe, 전체 경로)
 #[cfg_attr(not(windows), allow(dead_code))] // Windows에서만 쓴다
 pub fn is_wsl(prog: &str) -> bool {
-    std::path::Path::new(prog)
-        .file_stem()
-        .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("wsl"))
+    program_stem(prog) == "wsl"
 }
 
 /// 이 PC에서 고를 수 있는 셸. (보이는 이름, 셸 칸에 넣을 명령)
@@ -694,6 +695,14 @@ mod tests {
         assert_eq!(p(&[r"C:\Program Files\x"], ShellKind::Cmd), r#""C:\Program Files\x" "#);
         assert_eq!(p(&[], ShellKind::Cmd), "");
         assert_eq!(p(&["/a\nrm -rf ~"], ShellKind::Posix), "");
+    }
+
+    #[test]
+    fn program_names_ignore_folders_and_extensions() {
+        assert_eq!(program_stem(r#""C:\Program Files\Git\bin\bash.exe""#), "bash");
+        assert_eq!(program_stem("/usr/bin/zsh"), "zsh");
+        assert_eq!(program_stem("PowerShell.EXE"), "powershell");
+        assert_eq!(program_stem(".bashrc"), ".bashrc");
     }
 
     #[test]
