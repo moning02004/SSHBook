@@ -645,5 +645,20 @@
  "가져온 설정을 적용했습니다.": "Applied the imported settings.",
  "가져온 설정을 적용했습니다. 언어는 앱을 다시 켜면 바뀝니다.": "Applied the imported settings. The language changes after a restart.",
  "가져온 설정을 적용하지 못했습니다: {0}": "Could not apply the imported settings: {0}",
- "설정이 너무 커서 내보낼 수 없습니다.": "The settings are too large to export."
+ "설정이 너무 커서 내보낼 수 없습니다.": "The settings are too large to export.",
+ "다른 PC에서 내보낸 파일 가져오기 (추가하기·덮어쓰기)": "Import a file exported on another PC (add or overwrite)",
+ "가져올 파일을 고르세요.": "Choose a file to import.",
+ "세션 {0}개, 그룹 {1}개, 명령 {2}개, 서버 키 {3}개를 더했습니다.": "Added {0} sessions, {1} groups, {2} commands and {3} host keys.",
+ "이미 있는 세션 {0}개는 건너뛰었습니다.": "Skipped {0} sessions that already exist.",
+ "더할 것이 없었습니다. 모두 이미 있습니다.": "Nothing to add; everything is already here.",
+ "보관함을 가져온 파일로 바꿨습니다. 마스터 비밀번호는 이제 그 파일의 비밀번호입니다.": "Replaced the vault with the imported file. The master password is now that file's password.",
+ "다른 PC에서 내보낸 파일(.sshbook, .sshv)을 고르고, 그 파일의 마스터 비밀번호를 입력하세요.": "Choose a file exported on another PC (.sshbook, .sshv) and enter that file's master password.",
+ "그 파일의 마스터 비밀번호": "That file's master password",
+ "가져오는 방식": "How to import",
+ "추가하기": "Add",
+ "지금 세션은 그대로 두고, 없는 세션·그룹·명령·서버 키만 더합니다. 마스터 비밀번호도 그대로입니다.": "Keep the current sessions and add only missing sessions, groups, commands and host keys. The master password stays the same.",
+ "덮어쓰기": "Overwrite",
+ "지금 보관함을 이 파일로 통째로 바꿉니다. 지금 보관함은 같은 폴더에 .bak 파일로 남고, 마스터 비밀번호는 그 파일의 비밀번호가 됩니다.": "Replace the whole vault with this file. The current vault is kept as a .bak file in the same folder, and the master password becomes that file's password.",
+ "앱 설정도 가져오기 (글꼴·터미널 설정·테마·언어)": "Also import app settings (font, terminal, theme, language)",
+ "지금 쓰고 있는 보관함 파일입니다.": "This is the vault file currently in use."
 }

@@ -739,6 +739,54 @@ test("내보낸 book_settings.sshbook에 세션·그룹·설정이 함께 담기
   await expect(rightClick).toBeChecked({ checked: !before });
 });
 
+test("설정의 가져오기: 추가하기는 없는 세션만 더하고 설정을 적용하며, 덮어쓰기도 고를 수 있다", async ({ page }) => {
+  await createVault(page);
+  const rightClick = page.getByRole("checkbox", { name: /오른쪽 클릭으로 붙여넣기/ });
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "터미널" }).click();
+  const before = await rightClick.isChecked();
+  await rightClick.setChecked(!before);
+  // 내보낸 뒤 설정을 되돌린다(다른 PC라고 친다).
+  page.once("dialog", (d) => void d.accept("book_settings.sshbook"));
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "내보내기", exact: true }).click();
+  await expect(page.getByText(/세션·그룹·설정을 내보냈습니다/)).toBeVisible();
+  if (!(await page.getByRole("tab", { name: "터미널" }).isVisible())) await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "터미널" }).click();
+  await rightClick.setChecked(before);
+
+  // 가져오기 → 추가하기(기본)
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "가져오기", exact: true }).click();
+  const dlg = page.getByRole("dialog", { name: "가져오기" });
+  await expect(dlg.getByRole("radio", { name: /추가하기/ })).toBeChecked();
+  await expect(dlg.getByRole("button", { name: "추가하기", exact: true })).toBeDisabled();
+  page.once("dialog", (d) => void d.accept("book_settings.sshbook"));
+  await dlg.getByRole("button", { name: "파일 선택" }).click();
+  await dlg.locator('input[type="password"]').fill("wrong");
+  await dlg.getByRole("button", { name: "추가하기", exact: true }).click();
+  await expect(dlg.getByRole("alert")).toContainText("비밀번호가 틀렸");
+  await dlg.locator('input[type="password"]').fill(MASTER);
+  await dlg.getByRole("button", { name: "추가하기", exact: true }).click();
+  await expect(dlg).toHaveCount(0);
+  await expect(page.getByText(/세션 1개, 그룹 0개, 명령 0개, 서버 키 0개를 더했습니다\. 이미 있는 세션 3개는 건너뛰었습니다\. 가져온 설정을 적용했습니다\./)).toBeVisible();
+  await expect(page.locator(".session-row", { hasText: "imported-box" })).toBeVisible();
+  if (!(await page.getByRole("tab", { name: "터미널" }).isVisible())) await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "터미널" }).click();
+  await expect(rightClick).toBeChecked({ checked: !before });
+
+  // 덮어쓰기를 고르면 버튼도 바뀌고, 앱 설정은 빼고 가져올 수 있다.
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "가져오기", exact: true }).click();
+  page.once("dialog", (d) => void d.accept("book_settings.sshbook"));
+  await dlg.getByRole("button", { name: "파일 선택" }).click();
+  await dlg.locator('input[type="password"]').fill(MASTER);
+  await dlg.getByRole("radio", { name: /덮어쓰기/ }).check();
+  await dlg.getByRole("checkbox", { name: /앱 설정도 가져오기/ }).uncheck();
+  await dlg.getByRole("button", { name: "덮어쓰기", exact: true }).click();
+  await expect(page.getByText("보관함을 가져온 파일로 바꿨습니다. 마스터 비밀번호는 이제 그 파일의 비밀번호입니다.")).toBeVisible();
+});
+
 test("로컬 셸에 파일을 끌어다 놓으면 경로를 넣는다", async ({ page }) => {
   await createVault(page);
   await openLocal(page);

@@ -747,16 +747,25 @@ export function App() {
   };
 
   // 다른 PC에서 내보낸 파일을 가져왔으면 그 파일의 앱 설정(글꼴·테마·언어 등)을 적용한다.
-  const applyImportedSettings = async () => {
+  /** 가져온 앱 설정을 적용하고, 알릴 문장을 돌려준다 */
+  const applySettingsJson = (json: string): string => {
     try {
-      const json = await api.vaultTakeAppSettings();
-      if (!json) return;
       const r = importAppSettings(json);
       if (r.theme) setTheme(r.theme);
-      setNotice(r.languageChanged ? tx("가져온 설정을 적용했습니다. 언어는 앱을 다시 켜면 바뀝니다.") : tx("가져온 설정을 적용했습니다."));
+      return r.languageChanged ? tx("가져온 설정을 적용했습니다. 언어는 앱을 다시 켜면 바뀝니다.") : tx("가져온 설정을 적용했습니다.");
     } catch (e) {
-      setNotice(tx("가져온 설정을 적용하지 못했습니다: {0}", errorText(e)));
+      return tx("가져온 설정을 적용하지 못했습니다: {0}", errorText(e));
     }
+  };
+  const applyImportedSettings = async () => {
+    const json = await api.vaultTakeAppSettings().catch(() => null);
+    if (json) setNotice(applySettingsJson(json));
+  };
+  // 설정 → 보안 → 가져오기를 마쳤을 때
+  const onImported = async (r: { notice: string; appSettings: string | null }) => {
+    await refresh();
+    await reloadSessions().catch(() => {});
+    setNotice(r.appSettings ? `${r.notice} ${applySettingsJson(r.appSettings)}` : r.notice);
   };
 
   const exportVault = async (password?: string) => {
@@ -1048,6 +1057,7 @@ export function App() {
           passwordless={status.passwordless}
           onVaultChanged={refresh}
           onExport={(pw) => void exportVault(pw)}
+          onImported={onImported}
           sessions={sessions}
           groups={groupInfos}
           onGroupsChanged={reloadSessions}

@@ -277,6 +277,27 @@ pub struct VaultData {
 /// 내보내는 앱 설정의 최대 크기
 pub const APP_SETTINGS_MAX: usize = 64 * 1024;
 
+/// 다른 보관함을 더했을 때 늘어난 것
+#[derive(Serialize, Default, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeCount {
+    pub sessions: usize,
+    /// 이미 있어서 건너뛴 세션
+    pub skipped: usize,
+    pub groups: usize,
+    pub snippets: usize,
+    pub hosts: usize,
+}
+
+/// 같은 세션으로 볼지: 종류·이름·호스트·사용자·포트가 모두 같으면 같다.
+fn same_session(a: &Session, b: &Session) -> bool {
+    a.kind == b.kind
+        && a.name == b.name
+        && a.host == b.host
+        && a.user == b.user
+        && a.port.unwrap_or(22) == b.port.unwrap_or(22)
+}
+
 /// 사이드바에서 세션 하나의 자리: 순서대로 늘어놓은 세션과 그 그룹
 #[derive(Deserialize, Debug, Clone)]
 pub struct SessionPlace {
@@ -316,6 +337,56 @@ impl VaultData {
             }
         }
         out
+    }
+
+    /// 다른 보관함의 내용을 더한다. 이미 있는 것(같은 id 또는 같은 세션)은 건드리지 않는다.
+    /// 확인한 서버 키는 덮어쓰지 않는다(바뀐 키를 몰래 믿게 되지 않도록).
+    pub fn merge_from(&mut self, mut other: VaultData) -> MergeCount {
+        let mut c = MergeCount::default();
+        // 건너뛴 세션의 id → 이 보관함에 있는 같은 세션의 id (점프 호스트 연결을 이어 주려고)
+        let mut remap = BTreeMap::new();
+        let mut added = Vec::new();
+        for s in std::mem::take(&mut other.sessions) {
+            if let Some(e) = self.sessions.iter().find(|e| e.id == s.id || same_session(e, &s)) {
+                remap.insert(s.id.clone(), e.id.clone());
+                c.skipped += 1;
+                continue;
+            }
+            if let Some(sec) = other.secrets.remove(&s.id) {
+                self.secrets.insert(s.id.clone(), sec);
+            }
+            added.push(s);
+        }
+        for mut s in added {
+            if let Some(j) = s.jump_id.as_ref().and_then(|j| remap.get(j)) {
+                s.jump_id = Some(j.clone());
+            }
+            self.sessions.push(s);
+            c.sessions += 1;
+        }
+        for g in std::mem::take(&mut other.groups) {
+            if !self.groups.iter().any(|x| x.name == g.name) {
+                self.groups.push(g);
+                c.groups += 1;
+            }
+        }
+        for sn in std::mem::take(&mut other.snippets) {
+            if !self
+                .snippets
+                .iter()
+                .any(|x| x.id == sn.id || (x.name == sn.name && x.command == sn.command))
+            {
+                self.snippets.push(sn);
+                c.snippets += 1;
+            }
+        }
+        for (k, v) in std::mem::take(&mut other.known_hosts) {
+            if let std::collections::btree_map::Entry::Vacant(e) = self.known_hosts.entry(k) {
+                e.insert(v);
+                c.hosts += 1;
+            }
+        }
+        c
     }
 
     /// 사이드바 순서를 통째로 정한다. 목록에 없는 세션·그룹은 뒤에 그대로 남긴다.
@@ -814,6 +885,63 @@ mod tests {
             has_private_key: false,
             has_passphrase: false,
         }
+    }
+
+    #[test]
+    fn merge_adds_only_what_is_missing() {
+        let mut mine = VaultData::default();
+        mine.sessions.push(sample_session("a"));
+        mine.known_hosts.insert("h:22".into(), "ssh-ed25519 MINE".into());
+        mine.groups.push(Group {
+            name: "운영".into(),
+            color: Some("red".into()),
+        });
+
+        let mut other = VaultData::default();
+        // 같은 세션(id는 다르지만 이름·호스트·사용자·포트가 같다) → 건너뛴다
+        other.sessions.push(sample_session("a2"));
+        // 새 세션: 비밀번호와, 건너뛴 세션을 점프 호스트로 쓴다
+        let mut b = sample_session("b");
+        b.name = "db-01".into();
+        b.jump_id = Some("a2".into());
+        other.sessions.push(b);
+        let mut sec = Secret::default();
+        sec.password = Some("pw".into());
+        other.secrets.insert("b".into(), sec);
+        other.groups.push(Group {
+            name: "운영".into(),
+            color: Some("blue".into()),
+        });
+        other.groups.push(Group {
+            name: "개발".into(),
+            color: None,
+        });
+        other.known_hosts.insert("h:22".into(), "ssh-ed25519 OTHER".into());
+        other.known_hosts.insert("k:22".into(), "ssh-ed25519 K".into());
+
+        let c = mine.merge_from(other);
+        assert_eq!(
+            c,
+            MergeCount {
+                sessions: 1,
+                skipped: 1,
+                groups: 1,
+                snippets: 0,
+                hosts: 1
+            }
+        );
+        let b = mine.sessions.iter().find(|s| s.id == "b").unwrap();
+        assert_eq!(
+            b.jump_id.as_deref(),
+            Some("a"),
+            "점프 호스트는 이미 있던 세션으로 잇는다"
+        );
+        assert_eq!(mine.secrets["b"].password.as_deref(), Some("pw"));
+        assert_eq!(mine.groups[0].color.as_deref(), Some("red"), "있던 그룹 색은 그대로");
+        assert_eq!(
+            mine.known_hosts["h:22"], "ssh-ed25519 MINE",
+            "확인한 서버 키는 덮어쓰지 않는다"
+        );
     }
 
     #[test]

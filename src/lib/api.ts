@@ -97,6 +97,17 @@ export interface OpenOptions {
 }
 
 /** 이 PC에서 고를 수 있는 셸 */
+/** 다른 보관함을 더한 결과 */
+export interface MergeResult {
+  sessions: number;
+  /** 이미 있어서 건너뛴 세션 */
+  skipped: number;
+  groups: number;
+  snippets: number;
+  hosts: number;
+  appSettings: string | null;
+}
+
 export interface ShellChoice {
   label: string;
   /** 셸 칸에 넣는 명령(인자 포함, 예: wsl.exe -d Ubuntu) */
@@ -167,6 +178,8 @@ export interface Backend {
   vaultExport(dest: string, password?: string, appSettings?: string): Promise<void>;
   /** 가져온 파일에 들어 있던 앱 설정을 한 번 꺼낸다(없으면 null) */
   vaultTakeAppSettings(): Promise<string | null>;
+  /** 다른 보관함 파일의 내용을 지금 보관함에 더한다 */
+  vaultMerge(src: string, password: string): Promise<MergeResult>;
   vaultImport(src: string, password: string): Promise<void>;
   /** 보관함 자동 백업 목록(새것부터) */
   vaultBackups(): Promise<VaultBackup[]>;
@@ -260,6 +273,7 @@ const tauriBackend: Backend = {
   vaultChangePassword: (oldPassword, newPassword) => invoke("vault_change_password", { oldPassword, newPassword }),
   vaultExport: (dest, password, appSettings) => invoke("vault_export", { dest, password: password ?? null, appSettings: appSettings ?? null }),
   vaultTakeAppSettings: () => invoke("vault_take_app_settings"),
+  vaultMerge: (src, password) => invoke("vault_merge", { src, password }),
   vaultImport: (src, password) => invoke("vault_import", { src, password }),
   vaultBackups: () => invoke("vault_backups"),
   vaultRestore: (backup, password) => invoke("vault_restore", { backup, password }),
@@ -417,6 +431,12 @@ function createMockBackend(): Backend {
     async vaultExport(dest, _password, appSettings) {
       exportedSettings = appSettings ?? null;
       (window as unknown as { __lastExport?: unknown }).__lastExport = { dest, appSettings };
+    },
+    async vaultMerge(_src, password) {
+      if (password === "wrong") throw "비밀번호가 틀렸거나 파일이 손상되었습니다.";
+      const fresh = !sessions.some((s) => s.id === "imp1");
+      if (fresh) sessions = [...sessions, { id: "imp1", name: "imported-box", group: null, kind: "ssh", host: "10.9.9.9", port: 22, user: "me", auth: "agent" } as Session];
+      return { sessions: fresh ? 1 : 0, skipped: fresh ? 3 : 4, groups: 0, snippets: 0, hosts: 0, appSettings: exportedSettings };
     },
     async vaultTakeAppSettings() {
       const s = pendingSettings;

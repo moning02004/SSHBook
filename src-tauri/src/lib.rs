@@ -233,6 +233,40 @@ async fn vault_export(
     v.export_to(&dest, app_settings).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeResult {
+    #[serde(flatten)]
+    count: vault::MergeCount,
+    /// 그 파일에 들어 있던 앱 설정(JSON)
+    app_settings: Option<String>,
+}
+
+/// 다른 PC에서 내보낸 파일을 지금 보관함에 더한다(지금 세션과 마스터 비밀번호는 그대로).
+#[tauri::command]
+async fn vault_merge(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    src: String,
+    password: String,
+) -> CmdResult<MergeResult> {
+    let password = Zeroizing::new(password);
+    let src = PathBuf::from(src);
+    let mine = vault_path(&app)?;
+    if src == mine || matches!((src.canonicalize(), mine.canonicalize()), (Ok(a), Ok(b)) if a == b) {
+        return Err("지금 쓰고 있는 보관함 파일입니다.".into());
+    }
+    // 비밀번호 확인(시간이 걸린다)은 보관함을 잠그기 전에 한다.
+    let mut other = vault::OpenVault::open(&src, &password).map_err(|e| e.to_string())?;
+    let mut data = std::mem::take(&mut other.data);
+    let app_settings = data.app_settings.take();
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    let count = v.data.merge_from(data);
+    v.save().map_err(|e| e.to_string())?;
+    Ok(MergeResult { count, app_settings })
+}
+
 /// 가져온 보관함에 들어 있던 앱 설정을 한 번 꺼낸다(꺼낸 뒤에는 보관함에서 지운다).
 #[tauri::command]
 fn vault_take_app_settings(state: State<'_, AppState>) -> CmdResult<Option<String>> {
@@ -1317,6 +1351,7 @@ pub fn run() {
             clipboard_write,
             fonts_installable,
             local_shells,
+            vault_merge,
             vault_take_app_settings,
             term_drop_text,
             sidebar_manual,

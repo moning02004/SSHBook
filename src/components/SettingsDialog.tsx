@@ -25,6 +25,7 @@ import { GroupSettings } from "./GroupSettings";
 import { ShellInput } from "./ShellInput";
 import { IconClose, IconExport, IconUnlock } from "./Icons";
 import { ImportSshConfigDialog } from "./ImportSshConfigDialog";
+import { ImportVaultDialog, type ImportMode } from "./ImportVaultDialog";
 import { KnownHostsDialog } from "./KnownHostsDialog";
 import { PasswordModeDialog } from "./PasswordModeDialog";
 import { SideTabs } from "./SideTabs";
@@ -48,6 +49,8 @@ interface Props {
   onVaultChanged: () => void | Promise<void>;
   /** 보관함 파일 내보내기. password는 비밀번호 없이 쓰는 중일 때 내보낼 파일의 비밀번호 */
   onExport: (password?: string) => void;
+  /** 다른 PC의 파일을 가져온 뒤(추가하기·덮어쓰기). appSettings가 있으면 적용한다 */
+  onImported: (r: { mode: ImportMode; notice: string; appSettings: string | null }) => void | Promise<void>;
   /** 보관함 잠그기 */
   onLock: () => void;
   /** 지금 세션 목록(가져오기에서 중복을 가린다) */
@@ -107,9 +110,9 @@ const TABS: [SettingsTab, string][] = [
 let lastTab: SettingsTab = "appearance";
 
 /** 설정 화면. 바꾸는 즉시 열린 터미널에 적용되고 이 PC에 저장된다. */
-export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onLock, sessions, groups, onGroupsChanged, onClose }: Props) {
+export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordless, onVaultChanged, onExport, onImported, onLock, sessions, groups, onGroupsChanged, onClose }: Props) {
   useEscape(onClose);
-  const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | "sshconfig" | null>(null);
+  const [sub, setSub] = useState<"password" | "hosts" | "disable" | "enable" | "export" | "import" | "sshconfig" | null>(null);
   const s = useSettings();
   const [installed, setInstalled] = useState(() => new Map(FONT_PRESETS.map((f) => [f, isFontInstalled(f)])));
   const [installable, setInstallable] = useState<string[]>([]);
@@ -364,6 +367,9 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
                   <button className="btn" title={tx("다른 PC로 옮길 파일 내보내기 (세션·그룹·키·설정을 모두 담는다)")} onClick={() => (passwordless ? setSub("export") : onExport())}>
                     <IconExport width={14} height={14} />{" "}{tx("내보내기")}
                   </button>
+                  <button className="btn" title={tx("다른 PC에서 내보낸 파일 가져오기 (추가하기·덮어쓰기)")} onClick={() => setSub("import")}>
+                    <IconExport width={14} height={14} style={{ transform: "rotate(180deg)" }} />{" "}{tx("가져오기")}
+                  </button>
                   {!passwordless && (
                     <button className="btn" onClick={onLock}>
                       {tx("잠그기")}
@@ -491,6 +497,15 @@ export function SettingsDialog({ theme, onTheme, onOpenLogs, onNotice, passwordl
           onImported={async (m) => {
             await onVaultChanged();
             onNotice(m);
+          }}
+        />
+      )}
+      {sub === "import" && (
+        <ImportVaultDialog
+          onClose={() => setSub(null)}
+          onDone={async (r) => {
+            setSub(null);
+            await onImported(r);
           }}
         />
       )}
