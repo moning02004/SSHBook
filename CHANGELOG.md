@@ -5,6 +5,8 @@
 
 ## 다음 버전
 
+## 1.0.5 — 2026-11-27
+
 ### 새 기능
 - Windows: 로컬 셸을 Git Bash가 있으면 Git Bash로 열어 `ls`·`grep` 같은 리눅스 명령을 바로 쓴다. 없으면 PowerShell로 연다(전에는 cmd) (#8)
 - 설정 → 터미널 → "기본 로컬 셸"과 세션 편집 → 로컬 셸에서 이 PC에서 찾은 셸(Git Bash, cmd, PowerShell, WSL 배포판)을 고른다. WSL은 리눅스 홈에서 시작한다
