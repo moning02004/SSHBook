@@ -389,6 +389,26 @@ fn group_set_color(state: State<'_, AppState>, name: String, color: Option<Strin
 }
 
 /// 그룹을 지운다. 그 그룹의 세션은 그룹 없음으로 옮긴다.
+/// 사이드바를 끌어서 정한 순서로 보여 주는지
+#[tauri::command]
+fn sidebar_manual(state: State<'_, AppState>) -> CmdResult<bool> {
+    let guard = lock(&state.vault);
+    Ok(guard.as_ref().ok_or(LOCKED)?.data.manual_order)
+}
+
+/// 사이드바 순서(그룹 순서, 세션 순서와 그룹)를 저장한다.
+#[tauri::command]
+fn sidebar_reorder(
+    state: State<'_, AppState>,
+    groups: Vec<String>,
+    sessions: Vec<vault::SessionPlace>,
+) -> CmdResult<()> {
+    let mut guard = lock(&state.vault);
+    let v = guard.as_mut().ok_or(LOCKED)?;
+    v.data.reorder(&groups, &sessions)?;
+    v.save().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn group_delete(state: State<'_, AppState>, name: String) -> CmdResult<usize> {
     let mut guard = lock(&state.vault);
@@ -904,6 +924,16 @@ fn term_reveal_cwd(state: State<'_, AppState>, id: String, hint: Option<String>)
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// 로컬 셸에 끌어다 놓은 파일들을 그 셸에 맞는 경로 글자로 바꾼다.
+#[tauri::command]
+fn term_drop_text(state: State<'_, AppState>, id: String, paths: Vec<String>) -> CmdResult<String> {
+    match lock(&state.terms).get(&id) {
+        Some(Term::Local(p)) => Ok(p.drop_text(&paths)),
+        Some(Term::Ssh(_)) => Err("SSH 세션에는 파일 경로를 넣지 않습니다.".into()),
+        None => Err("연결이 끊어졌습니다.".into()),
+    }
+}
+
 /// 터미널 안 프로그램이 OSC 52로 보낸 글자를 클립보드에 넣는다.
 /// 웹뷰의 클립보드 API는 사용자가 누른 순간에만 되는 곳이 있어서(macOS) 앱이 직접 넣는다.
 #[tauri::command]
@@ -915,6 +945,12 @@ fn clipboard_write(text: String) -> CmdResult<()> {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set_text(text))
         .map_err(|e| format!("클립보드에 넣지 못했습니다: {e}"))
+}
+
+/// 터미널 안의 링크를 기본 브라우저로 연다(http·https만).
+#[tauri::command]
+fn open_url(url: String) -> CmdResult<()> {
+    pty::open_web_url(&url)
 }
 
 /// 이 PC에서 고를 수 있는 셸(cmd, PowerShell, WSL 배포판, /etc/shells …)
@@ -1259,6 +1295,10 @@ pub fn run() {
             clipboard_write,
             fonts_installable,
             local_shells,
+            term_drop_text,
+            sidebar_manual,
+            sidebar_reorder,
+            open_url,
             font_install,
             term_auth_answer,
             app_set_language,

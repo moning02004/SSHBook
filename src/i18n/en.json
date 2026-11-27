@@ -602,7 +602,6 @@
  "그리기": "Rendering",
  "GPU로 그리기": "Render with the GPU",
  "화면을 자주 다시 그리는 프로그램에서도 부드럽습니다. 글자가 깨지거나 번지면 끄세요.": "Keeps programs that redraw the screen often smooth. Turn it off if text looks broken or blurry.",
- "{0} 연결 (열린 탭이 있으면 그 탭으로, 휠 클릭은 새 탭)": "Connect {0} (goes to its tab if already open; middle-click for a new tab)",
  "새 탭으로 열기": "Open in New Tab",
  "편집…": "Edit…",
  "제거…": "Remove…",
@@ -632,5 +631,14 @@
  "명령 프롬프트 (cmd)": "Command Prompt (cmd)",
  "세션 없이 여는 로컬 셸 탭에 씁니다. Windows는 Git Bash가 있으면 ls·grep 같은 리눅스 명령을 바로 쓰도록 Git Bash로 엽니다(Git for Windows에 들어 있음). 세션마다 다른 셸은 세션 편집 → 로컬 셸에서 정합니다.": "Used for local shell tabs opened without a session. On Windows, Git Bash (part of Git for Windows) is used when installed so Linux commands like ls and grep just work. Set a shell per session in Edit Session → Local Shell.",
  "셸 (비우면 기본 셸)": "Shell (empty for the default)",
- "비우면 기본 셸 (Windows는 Git Bash, 없으면 PowerShell)": "Leave empty for the default (Git Bash on Windows, else PowerShell)"
+ "비우면 기본 셸 (Windows는 Git Bash, 없으면 PowerShell)": "Leave empty for the default (Git Bash on Windows, else PowerShell)",
+ "http·https 주소만 열 수 있습니다.": "Only http and https addresses can be opened.",
+ "열 수 없는 주소입니다.": "This address cannot be opened.",
+ "브라우저를 열지 못했습니다: {}": "Could not open the browser: {}",
+ "링크를 열지 못했습니다: {0}": "Could not open the link: {0}",
+ "순서를 저장하지 못했습니다: {0}": "Could not save the order: {0}",
+ "{0} 연결 (열린 탭이 있으면 그 탭으로, 휠 클릭은 새 탭, 끌어서 순서 바꾸기)": "Connect {0} (goes to its open tab if any; middle-click for a new tab; drag to reorder)",
+ "끌어서 그룹 순서 바꾸기": "Drag to reorder groups",
+ "SSH 세션에는 파일 경로를 넣지 않습니다.": "File paths are not inserted into SSH sessions.",
+ "파일 경로를 넣지 못했습니다: {0}": "Could not insert the file path: {0}"
 }

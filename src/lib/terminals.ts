@@ -5,6 +5,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import type { AuthPrompt } from "./api";
 import { api, parseOpenError, type OpenOptions } from "./api";
@@ -70,6 +71,8 @@ export interface PaneEntry {
   composing: boolean;
   /** 조합 중에 Shift+Enter를 눌러 조합이 끝나면 보낼 줄바꿈 */
   pendingNewline: boolean;
+  /** 조합이 막 끝나 xterm이 아직 그 글자를 보내지 않았다(다음 틱까지) */
+  flushPending: boolean;
   imeWired: boolean;
 }
 
@@ -417,6 +420,9 @@ export function wireIme(e: PaneEntry) {
   });
   ta.addEventListener("compositionend", () => {
     e.composing = false;
+    // xterm은 조합한 글자를 다음 틱에 보낸다. 그때까지는 Shift+Enter를 미뤄야 순서가 맞는다.
+    e.flushPending = true;
+    setTimeout(() => (e.flushPending = false), 0);
     if (!e.pendingNewline) return;
     e.pendingNewline = false;
     // xterm이 조합한 글자를 보낸 다음(setTimeout 0) 줄바꿈을 보낸다.
@@ -450,6 +456,12 @@ function detachGpuRenderer(e: PaneEntry) {
   webgl.delete(e.paneId);
 }
 
+let linkErrorHandler: (message: string) => void = () => {};
+/** 링크를 열지 못했을 때 알릴 곳(앱의 알림줄) */
+export function setLinkErrorHandler(fn: (message: string) => void) {
+  linkErrorHandler = fn;
+}
+
 /** 앱 단축키(분할 등)는 xterm이 셸로 보내지 않도록 걸러낸다. */
 export function setShortcutFilter(fn: (e: KeyboardEvent) => boolean) {
   shortcutFilter = fn;
@@ -473,6 +485,13 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
   term.loadAddon(fit);
   const search = new SearchAddon({ highlightLimit: 2000 });
   term.loadAddon(search);
+  // 출력 안의 http·https 링크: 마우스를 올리면 밑줄, 누르면 기본 브라우저로 연다.
+  term.loadAddon(
+    new WebLinksAddon((ev, uri) => {
+      ev.preventDefault();
+      void api.openUrl(uri).catch((err) => linkErrorHandler(String(err)));
+    }),
+  );
   term.attachCustomKeyEventHandler((e) => {
     if (shortcutFilter(e)) return false;
     // Shift+Enter: 그냥 Enter와 구별되도록 ESC+Enter(Alt+Enter와 같은 신호)를 보낸다.
@@ -493,7 +512,11 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
         return false;
       }
       // 방금 조합이 끝났다면 xterm이 글자를 다음 틱에 보내므로 그 뒤로 미룬다.
-      if (e.type === "keydown") setTimeout(() => term.input(SHIFT_ENTER, true), 0);
+      // 그 밖에는 바로 보낸다(미루면 뒤이어 친 글자가 줄바꿈보다 먼저 갈 수 있다).
+      if (e.type === "keydown") {
+        if (entry?.flushPending) setTimeout(() => term.input(SHIFT_ENTER, true), 0);
+        else term.input(SHIFT_ENTER, true);
+      }
       e.preventDefault();
       return false;
     }
@@ -532,6 +555,7 @@ export function getPane(paneId: string, sessionId: string | null, autoConnect = 
     cwdHint: null,
     composing: false,
     pendingNewline: false,
+    flushPending: false,
     imeWired: false,
     backendId: Promise.resolve(null),
   };
@@ -675,6 +699,18 @@ function safePaste(e: PaneEntry, text: string) {
   const warning = pasteWarning(clean, e.term.modes.bracketedPasteMode, targets);
   if (warning && !window.confirm(warning)) return;
   e.term.paste(clean);
+}
+
+/** 끌어다 놓은 파일들의 경로를 로컬 셸에 넣는다(실행하지 않음). SSH 창이면 false. */
+export async function dropPaths(paneId: string, paths: string[]): Promise<boolean> {
+  const e = entries.get(paneId);
+  if (!e?.liveId || !paths.length) return false;
+  // SSH 창이면 백엔드가 거절한다.
+  const text = await api.termDropText(e.liveId, paths).catch(() => "");
+  if (!text) return false;
+  e.term.paste(text);
+  e.term.focus();
+  return true;
 }
 
 /** 로컬 셸의 지금 폴더를 Finder·탐색기로 연다. 연 경로를 돌려준다. */

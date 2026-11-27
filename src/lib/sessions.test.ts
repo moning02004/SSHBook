@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupSessions, type Session, UNGROUPED_LABEL } from "./sessions";
+import { groupSessions, layoutOf, moveGroup, moveSession, type Session, UNGROUPED_LABEL } from "./sessions";
 
 const s = (name: string, group: string | null = null): Session => ({ id: name, name, group, kind: "ssh" });
 
@@ -35,5 +35,43 @@ describe("groupSessions", () => {
       [UNGROUPED_LABEL, 1],
     ]);
     expect(groupSessions([], ["개발"]).map((x) => x.title)).toEqual(["개발"]);
+  });
+});
+
+describe("직접 정한 순서", () => {
+  const mk = (id: string, name: string, group?: string): Session => ({ id, name, kind: "ssh", host: "h", group: group ?? null }) as Session;
+  const list = [mk("c", "다", "운영"), mk("a", "가", "개발"), mk("b", "나", "운영"), mk("d", "라")];
+
+  it("manual이면 그룹과 세션을 주어진 순서대로 둔다", () => {
+    const secs = groupSessions(list, ["운영", "개발"], true);
+    expect(secs.map((x) => x.title)).toEqual(["운영", "개발", UNGROUPED_LABEL]);
+    expect(secs[0].sessions.map((x) => x.id)).toEqual(["c", "b"]);
+    // manual이 아니면 지금처럼 가나다순
+    expect(groupSessions(list, ["운영", "개발"]).map((x) => x.title)).toEqual(["개발", "운영", UNGROUPED_LABEL]);
+  });
+
+  it("세션을 같은 그룹 안에서, 다른 그룹으로, 그룹 없음으로 옮긴다", () => {
+    const secs = groupSessions(list, ["운영", "개발"], true);
+    expect(layoutOf(moveSession(secs, "b", "운영", "c")).sessions.map((x) => x.id)).toEqual(["b", "c", "a", "d"]);
+    const moved = layoutOf(moveSession(secs, "c", "개발", null));
+    expect(moved.sessions).toEqual([
+      { id: "b", group: "운영" },
+      { id: "a", group: "개발" },
+      { id: "c", group: "개발" },
+      { id: "d", group: null },
+    ]);
+    expect(layoutOf(moveSession(secs, "a", null, "d")).sessions.at(-2)).toEqual({ id: "a", group: null });
+  });
+
+  it("그룹 순서를 바꾸고, '그룹 없음'은 늘 맨 끝에 둔다", () => {
+    const secs = groupSessions(list, ["운영", "개발"], true);
+    expect(layoutOf(moveGroup(secs, "개발", "운영")).groups).toEqual(["개발", "운영"]);
+    const toEnd = moveGroup(moveGroup(secs, "개발", "운영"), "개발", null);
+    expect(toEnd.map((x) => x.title)).toEqual(["운영", "개발", UNGROUPED_LABEL]);
+  });
+
+  it("빈 그룹으로도 옮긴다", () => {
+    const secs = groupSessions(list, ["운영", "개발", "빈"], true);
+    expect(layoutOf(moveSession(secs, "d", "빈", null)).sessions.at(-1)).toEqual({ id: "d", group: "빈" });
   });
 });

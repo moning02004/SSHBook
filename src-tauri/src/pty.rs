@@ -26,6 +26,115 @@ pub struct LocalPty {
     child: Box<dyn Child + Send + Sync>,
     /// 셸을 시작한 폴더. 지금 폴더를 알 수 없을 때 쓴다.
     start_dir: Option<PathBuf>,
+    /// 끌어다 놓은 파일 경로를 어떤 꼴로 넣을지
+    kind: ShellKind,
+}
+
+/// 경로를 적는 방식으로 본 셸의 종류
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellKind {
+    /// macOS·Linux 셸
+    Posix,
+    /// Windows의 Git Bash 같은 MSYS 셸: /c/Users/…
+    Msys,
+    /// WSL: /mnt/c/Users/…
+    Wsl,
+    PowerShell,
+    Cmd,
+}
+
+/// 실행한 프로그램으로 셸 종류를 짐작한다.
+pub fn shell_kind(prog: &str, windows: bool) -> ShellKind {
+    if !windows {
+        return ShellKind::Posix;
+    }
+    let p = prog.trim_matches('"');
+    let stem = std::path::Path::new(p)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match stem.as_str() {
+        "cmd" => ShellKind::Cmd,
+        "powershell" | "pwsh" => ShellKind::PowerShell,
+        "wsl" => ShellKind::Wsl,
+        // 시스템 폴더의 bash.exe는 WSL을 띄운다.
+        "bash" if p.to_lowercase().contains(r"\system32\") => ShellKind::Wsl,
+        "bash" | "sh" | "zsh" | "fish" | "git-bash" => ShellKind::Msys,
+        _ => ShellKind::Cmd,
+    }
+}
+
+/// POSIX 셸에 넣을 경로: 그대로 써도 되면 그대로, 아니면 작은따옴표로 감싼다.
+fn posix_quote(p: &str) -> String {
+    let safe =
+        !p.is_empty() && !p.starts_with('~') && p.chars().all(|c| c.is_alphanumeric() || "_-./@+,=:%".contains(c));
+    if safe {
+        p.to_string()
+    } else {
+        format!("'{}'", p.replace('\'', r"'\''"))
+    }
+}
+
+/// Windows 경로 → MSYS(/c/Users/…) 또는 WSL(/mnt/c/Users/…) 경로
+fn windows_to_unix(p: &str, wsl: bool) -> String {
+    let slash = p.replace('\\', "/");
+    // \\wsl$\Ubuntu\home\me 같은 WSL 안의 파일은 리눅스 경로 그대로
+    if wsl {
+        let lower = slash.to_lowercase();
+        for pre in ["//wsl$/", "//wsl.localhost/"] {
+            if lower.starts_with(pre) {
+                let rest = &slash[pre.len()..];
+                return match rest.find('/') {
+                    Some(i) => rest[i..].to_string(),
+                    None => "/".into(),
+                };
+            }
+        }
+    }
+    let b = slash.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        let drive = (b[0] as char).to_ascii_lowercase();
+        let rest = &slash[2..];
+        return if wsl {
+            format!("/mnt/{drive}{rest}")
+        } else {
+            format!("/{drive}{rest}")
+        };
+    }
+    slash
+}
+
+/// 끌어다 놓은 파일들을 셸에 넣을 글자로 만든다. macOS 터미널처럼 끝에 빈칸을 하나 둔다.
+pub fn dropped_paths_text(paths: &[String], kind: ShellKind) -> String {
+    let one = |p: &str| match kind {
+        ShellKind::Posix => posix_quote(p),
+        ShellKind::Msys => posix_quote(&windows_to_unix(p, false)),
+        ShellKind::Wsl => posix_quote(&windows_to_unix(p, true)),
+        ShellKind::PowerShell => {
+            if !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || r"_-./\:+=".contains(c)) {
+                p.to_string()
+            } else {
+                format!("'{}'", p.replace('\'', "''"))
+            }
+        }
+        ShellKind::Cmd => {
+            if !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || r"_-./\:@+".contains(c)) {
+                p.to_string()
+            } else {
+                format!("\"{p}\"")
+            }
+        }
+    };
+    let mut out = paths
+        .iter()
+        .filter(|p| !p.is_empty() && !p.chars().any(char::is_control))
+        .map(|p| one(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out
 }
 
 enum PumpMsg {
@@ -174,7 +283,7 @@ pub fn spawn(
     let argv = shell.as_deref().map(split_command).filter(|a| !a.is_empty());
     let explicit_cwd = cwd.as_deref().is_some_and(|c| !c.trim().is_empty());
     #[cfg(windows)]
-    let mut cmd = {
+    let (mut cmd, kind) = {
         // 인자를 붙이려면 기본 셸도 프로그램 이름이 있어야 한다.
         let argv = argv.unwrap_or_else(default_windows_shell);
         let mut c = CommandBuilder::new(&argv[0]);
@@ -184,17 +293,17 @@ pub fn spawn(
             c.args(["--cd", "~"]);
         }
         add_cwd_reporting(&mut c, &argv[0]);
-        c
+        (c, shell_kind(&argv[0], true))
     };
     #[cfg(not(windows))]
-    let mut cmd = match argv {
+    let (mut cmd, kind) = match argv {
         Some(argv) => {
             let _ = explicit_cwd;
             let mut c = CommandBuilder::new(&argv[0]);
             c.args(&argv[1..]);
-            c
+            (c, shell_kind(&argv[0], false))
         }
-        None => CommandBuilder::new_default_prog(),
+        None => (CommandBuilder::new_default_prog(), shell_kind("", false)),
     };
     let dir = cwd
         .as_deref()
@@ -232,6 +341,7 @@ pub fn spawn(
         writer,
         child,
         start_dir: dir,
+        kind,
     })
 }
 
@@ -250,6 +360,11 @@ impl LocalPty {
                 pixel_height: 0,
             })
             .map_err(e2s)
+    }
+
+    /// 끌어다 놓은 파일 경로를 이 셸에 맞게 적는다.
+    pub fn drop_text(&self, paths: &[String]) -> String {
+        dropped_paths_text(paths, self.kind)
     }
 
     /// 셸의 지금 폴더. Windows는 셸이 알려 준 값(hint)을 쓰고, 모르면 시작한 폴더로 본다.
@@ -342,6 +457,7 @@ fn default_windows_shell() -> Vec<String> {
 }
 
 /// Git Bash(MSYS) 경로를 Windows 경로로: `/c/Users/me` → `C:\Users\me`. 그 밖의 경로는 그대로.
+#[cfg_attr(not(windows), allow(dead_code))] // Windows에서만 쓴다
 pub fn msys_to_windows(p: &str) -> String {
     let b = p.as_bytes();
     if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
@@ -356,6 +472,7 @@ pub fn msys_to_windows(p: &str) -> String {
 }
 
 /// 프로그램 이름이 WSL인지(wsl, wsl.exe, 전체 경로)
+#[cfg_attr(not(windows), allow(dead_code))] // Windows에서만 쓴다
 pub fn is_wsl(prog: &str) -> bool {
     std::path::Path::new(prog)
         .file_stem()
@@ -471,6 +588,36 @@ pub fn is_network_path(s: &str) -> bool {
     s.starts_with(r"\\") || s.starts_with("//")
 }
 
+/// 브라우저로 열어도 되는 주소인지: http·https만, 공백·제어 문자 없이.
+pub fn check_web_url(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("http·https 주소만 열 수 있습니다.".into());
+    }
+    if url.len() > 4096 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("열 수 없는 주소입니다.".into());
+    }
+    Ok(())
+}
+
+/// 주소를 기본 브라우저로 연다. 셸을 거치지 않아 주소 안의 `&` 같은 글자가 명령이 되지 않는다.
+pub fn open_web_url(url: &str) -> Result<(), String> {
+    check_web_url(url)?;
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    cmd.arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("브라우저를 열지 못했습니다: {e}"))
+}
+
 /// 폴더를 Finder·탐색기로 연다. 이 PC에 있는 폴더만 연다(파일을 넘기면 실행될 수 있다).
 pub fn reveal_dir(dir: &std::path::Path) -> Result<(), String> {
     let s = dir.to_string_lossy();
@@ -522,6 +669,52 @@ mod tests {
         for c in available_shells() {
             println!("{} => {}", c.label, c.command);
         }
+    }
+
+    #[test]
+    fn dropped_paths_follow_each_shell() {
+        let p = |v: &[&str], k| dropped_paths_text(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), k);
+        // macOS·Linux
+        assert_eq!(p(&["/Users/me/a.txt"], ShellKind::Posix), "/Users/me/a.txt ");
+        assert_eq!(
+            p(&["/Users/me/내 문서/it's.txt"], ShellKind::Posix),
+            r"'/Users/me/내 문서/it'\''s.txt' "
+        );
+        assert_eq!(p(&["/a", "/b c"], ShellKind::Posix), "/a '/b c' ");
+        // Windows
+        assert_eq!(p(&[r"C:\Users\me\a.txt"], ShellKind::Msys), "/c/Users/me/a.txt ");
+        assert_eq!(p(&[r"D:\My Files\a.txt"], ShellKind::Msys), "'/d/My Files/a.txt' ");
+        assert_eq!(p(&[r"C:\Users\me\a.txt"], ShellKind::Wsl), "/mnt/c/Users/me/a.txt ");
+        assert_eq!(p(&[r"\\wsl.localhost\Ubuntu\home\me\x"], ShellKind::Wsl), "/home/me/x ");
+        assert_eq!(p(&[r"C:\Users\me\a.txt"], ShellKind::PowerShell), r"C:\Users\me\a.txt ");
+        assert_eq!(
+            p(&[r"C:\My Files\it's (1).txt"], ShellKind::PowerShell),
+            r"'C:\My Files\it''s (1).txt' "
+        );
+        assert_eq!(p(&[r"C:\Program Files\x"], ShellKind::Cmd), r#""C:\Program Files\x" "#);
+        assert_eq!(p(&[], ShellKind::Cmd), "");
+        assert_eq!(p(&["/a\nrm -rf ~"], ShellKind::Posix), "");
+    }
+
+    #[test]
+    fn shell_kinds_are_guessed_from_the_program() {
+        assert_eq!(shell_kind(r"C:\Program Files\Git\bin\bash.exe", true), ShellKind::Msys);
+        assert_eq!(shell_kind(r"C:\Windows\System32\bash.exe", true), ShellKind::Wsl);
+        assert_eq!(shell_kind("wsl.exe", true), ShellKind::Wsl);
+        assert_eq!(shell_kind("pwsh", true), ShellKind::PowerShell);
+        assert_eq!(shell_kind("cmd.exe", true), ShellKind::Cmd);
+        assert_eq!(shell_kind("/bin/zsh", false), ShellKind::Posix);
+    }
+
+    #[test]
+    fn only_web_urls_are_opened() {
+        assert!(check_web_url("https://github.com/moning02004/SSHBook?a=1&b=2").is_ok());
+        assert!(check_web_url("HTTP://localhost:8080/").is_ok());
+        assert!(check_web_url("file:///C:/Windows/System32/calc.exe").is_err());
+        assert!(check_web_url("javascript:alert(1)").is_err());
+        assert!(check_web_url(r"C:\Windows\notepad.exe").is_err());
+        assert!(check_web_url("https://a.com/ x").is_err());
+        assert!(check_web_url("https://a.com/\nrm").is_err());
     }
 
     #[test]

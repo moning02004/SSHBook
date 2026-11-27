@@ -88,21 +88,70 @@ const byName = (a: Session, b: Session) => a.name.localeCompare(b.name, "ko");
  * 그룹을 하나도 쓰지 않으면 제목 없는 목록 하나를 돌려준다.
  * 그룹이 하나라도 있으면 그룹별 묶음을 만들고, 그룹 없는 세션은 맨 아래 "그룹 없음"으로 모은다.
  */
-export function groupSessions(list: Session[], extraGroups: string[] = []): SessionSection[] {
+export function groupSessions(list: Session[], extraGroups: string[] = [], manual = false): SessionSection[] {
   const extra = extraGroups.map((g) => g.trim()).filter(Boolean);
   if (list.length === 0 && extra.length === 0) return [];
-  const names = [...new Set([...list.map(groupOf).filter((g): g is string => g !== null), ...extra])].sort((a, b) =>
-    a.localeCompare(b, "ko"),
-  );
-  if (names.length === 0) return [{ title: null, sessions: [...list].sort(byName) }];
+  // 직접 정한 순서(manual)면 그룹은 extraGroups 순서, 세션은 목록 순서 그대로. 아니면 가나다순.
+  const sort = (xs: Session[]) => (manual ? xs : [...xs].sort(byName));
+  const all = [...new Set(manual ? [...extra, ...list.map(groupOf).filter((g): g is string => g !== null)] : [...list.map(groupOf).filter((g): g is string => g !== null), ...extra])];
+  const names = manual ? all : all.sort((a, b) => a.localeCompare(b, "ko"));
+  if (names.length === 0) return [{ title: null, sessions: sort(list) }];
 
   const sections: SessionSection[] = names.map((title) => ({
     title,
-    sessions: list.filter((s) => groupOf(s) === title).sort(byName),
+    sessions: sort(list.filter((s) => groupOf(s) === title)),
   }));
-  const ungrouped = list.filter((s) => groupOf(s) === null).sort(byName);
+  const ungrouped = sort(list.filter((s) => groupOf(s) === null));
   if (ungrouped.length) sections.push({ title: UNGROUPED_LABEL, sessions: ungrouped });
   return sections;
+}
+
+/** 사이드바 배치: 그룹 순서와, 세션마다 순서대로 속한 그룹 */
+export interface SidebarLayout {
+  groups: string[];
+  sessions: { id: string; group: string | null }[];
+}
+
+/** 섹션 제목을 그룹 이름으로(제목 없음·'그룹 없음'은 null) */
+const groupOfSection = (sec: SessionSection): string | null => (sec.title === null || sec.title === UNGROUPED_LABEL ? null : sec.title);
+
+export function layoutOf(sections: SessionSection[]): SidebarLayout {
+  return {
+    groups: sections.map(groupOfSection).filter((g): g is string => g !== null),
+    sessions: sections.flatMap((sec) => sec.sessions.map((s) => ({ id: s.id, group: groupOfSection(sec) }))),
+  };
+}
+
+/**
+ * 세션 하나를 옮긴다. group 섹션의 beforeId 앞에 넣고, beforeId가 없으면 그 그룹 맨 끝에 넣는다.
+ * 그룹을 바꾸면 세션의 그룹도 바뀐다.
+ */
+export function moveSession(sections: SessionSection[], id: string, group: string | null, beforeId: string | null): SessionSection[] {
+  const moving = sections.flatMap((s) => s.sessions).find((s) => s.id === id);
+  if (!moving || beforeId === id) return sections;
+  const out = sections.map((sec) => ({ ...sec, sessions: sec.sessions.filter((s) => s.id !== id) }));
+  let target = out.find((sec) => groupOfSection(sec) === group);
+  if (!target) {
+    // '그룹 없음' 섹션이 아직 없으면 만든다(그룹이 하나도 없으면 제목 없는 목록).
+    target = { title: group ?? (out.some((s) => s.title !== null) ? UNGROUPED_LABEL : null), sessions: [] };
+    out.push(target);
+  }
+  const at = beforeId ? target.sessions.findIndex((s) => s.id === beforeId) : -1;
+  const moved = { ...moving, group };
+  if (at < 0) target.sessions.push(moved);
+  else target.sessions.splice(at, 0, moved);
+  return out;
+}
+
+/** 그룹 하나를 before 그룹 앞으로 옮긴다(before가 없으면 그룹들 맨 끝, '그룹 없음' 앞). */
+export function moveGroup(sections: SessionSection[], name: string, before: string | null): SessionSection[] {
+  const sec = sections.find((s) => groupOfSection(s) === name);
+  if (!sec || before === name) return sections;
+  const rest = sections.filter((s) => s !== sec);
+  const at = before ? rest.findIndex((s) => groupOfSection(s) === before) : rest.findIndex((s) => groupOfSection(s) === null);
+  if (at < 0) rest.push(sec);
+  else rest.splice(at, 0, sec);
+  return rest;
 }
 
 export function describeForward(f: Forward): string {

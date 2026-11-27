@@ -187,6 +187,10 @@ export interface Backend {
   sessionsRenameGroup(from: string, to: string): Promise<number>;
   /** 미리 만든 그룹 + 세션에 적힌 그룹 */
   groupsList(): Promise<Group[]>;
+  /** 사이드바를 끌어서 정한 순서로 보여 주는지(아니면 가나다순) */
+  sidebarManual(): Promise<boolean>;
+  /** 사이드바 순서 저장: 그룹 순서와, 순서대로 늘어놓은 세션과 그 그룹 */
+  sidebarReorder(groups: string[], sessions: { id: string; group: string | null }[]): Promise<void>;
   groupAdd(name: string, color: SessionColor | null): Promise<Group>;
   groupSetColor(name: string, color: SessionColor | null): Promise<void>;
   /** 그룹을 지운다. 그 그룹의 세션은 그룹 없음으로. 옮긴 세션 수 */
@@ -231,6 +235,10 @@ export interface Backend {
   fontsInstallable(): Promise<string[]>;
   /** 이 PC에서 고를 수 있는 셸(cmd, PowerShell, WSL 배포판, /etc/shells …) */
   localShells(): Promise<ShellChoice[]>;
+  /** 로컬 셸에 끌어다 놓은 파일들 → 그 셸에 맞게 적은 경로 */
+  termDropText(id: string, paths: string[]): Promise<string>;
+  /** 링크를 기본 브라우저로 연다(http·https만) */
+  openUrl(url: string): Promise<void>;
   /** 글꼴을 내려받아 이 사용자 계정에 설치한다 */
   fontInstall(family: string): Promise<void>;
   onTermData(cb: (e: TermData) => void): Promise<() => void>;
@@ -261,6 +269,8 @@ const tauriBackend: Backend = {
     invoke("session_update_secret", { id, password: secret.password ?? null, passphrase: secret.passphrase ?? null, add: add ?? false }),
   sessionsRenameGroup: (from, to) => invoke("sessions_rename_group", { from, to }),
   groupsList: () => invoke("groups_list"),
+  sidebarManual: () => invoke("sidebar_manual"),
+  sidebarReorder: (groups, sessions) => invoke("sidebar_reorder", { groups, sessions }),
   groupAdd: (name, color) => invoke("group_add", { name, color }),
   groupSetColor: (name, color) => invoke("group_set_color", { name, color }),
   groupDelete: (name) => invoke("group_delete", { name }),
@@ -293,6 +303,8 @@ const tauriBackend: Backend = {
   clipboardWrite: (text) => invoke("clipboard_write", { text }),
   fontsInstallable: () => invoke("fonts_installable"),
   localShells: () => invoke("local_shells"),
+  termDropText: (id, paths) => invoke("term_drop_text", { id, paths }),
+  openUrl: (url) => invoke("open_url", { url }),
   fontInstall: (family) => invoke("font_install", { family }),
   onTermData: (cb) => listen<TermData>("term-data", (e) => cb(e.payload)),
   onTermExit: (cb) => listen<TermExit>("term-exit", (e) => cb(e.payload)),
@@ -306,6 +318,7 @@ function createMockBackend(): Backend {
   let unlocked = false;
   let passwordless = false;
   let groups: Group[] = [];
+  let manualOrder = false;
   let snippets: Snippet[] = [
     { id: "s1", name: "도커 로그", command: "docker compose logs -f --tail=200 api" },
     { id: "s2", name: "디스크 사용량", command: "df -h" },
@@ -456,6 +469,27 @@ function createMockBackend(): Backend {
       else groups = groups.map((g) => (g.name === from ? { ...g, name } : g));
       return n;
     },
+    async sidebarManual() {
+      return manualOrder;
+    },
+    async sidebarReorder(order, places) {
+      const rest = [...sessions];
+      const next: Session[] = [];
+      for (const p of places) {
+        const i = rest.findIndex((s) => s.id === p.id);
+        if (i < 0) continue;
+        next.push({ ...rest.splice(i, 1)[0], group: p.group });
+      }
+      sessions = [...next, ...rest];
+      const old = [...groups];
+      const ordered: Group[] = [];
+      for (const name of order) {
+        const i = old.findIndex((g) => g.name === name);
+        ordered.push(i >= 0 ? old.splice(i, 1)[0] : { name, color: null });
+      }
+      groups = [...ordered, ...old];
+      manualOrder = true;
+    },
     async groupsList() {
       const used = sessions.map((s) => s.group?.trim()).filter((g): g is string => !!g);
       return [...groups, ...[...new Set(used)].filter((g) => !groups.some((x) => x.name === g)).map((name) => ({ name, color: null }))];
@@ -572,6 +606,8 @@ function createMockBackend(): Backend {
           return void setTimeout(() => exitSubs.forEach((cb) => cb({ id, code: 0 })), 30);
         }
         // 미리보기: 터미널 안 프로그램이 클립보드에 복사하는 것(OSC 52)을 흉내 낸다.
+        // 미리보기: 링크가 든 출력
+        if (line === "link") return emit(id, "\r\nhttps://example.com/docs?a=1&b=2\r\n$ ");
         if (line === "osc52") return emit(id, `\x1b]52;c;${btoa("copied by app")}\x07\r\n$ `);
         return emit(id, "\r\n$ ");
       }
@@ -590,6 +626,12 @@ function createMockBackend(): Backend {
     },
     async clipboardWrite(text) {
       await navigator.clipboard.writeText(text);
+    },
+    async openUrl(url) {
+      (window as unknown as { __openedUrls?: string[] }).__openedUrls = [...((window as unknown as { __openedUrls?: string[] }).__openedUrls ?? []), url];
+    },
+    async termDropText(_id, paths) {
+      return paths.map((p) => (/^[\w./-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`)).join(" ") + (paths.length ? " " : "");
     },
     async localShells() {
       return [

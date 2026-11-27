@@ -266,6 +266,16 @@ pub struct VaultData {
     /// 미리 만든 그룹과 그룹 색. 세션에만 적힌 그룹은 여기 없을 수도 있다.
     #[serde(default)]
     pub groups: Vec<Group>,
+    /// 사이드바를 사용자가 끌어서 정한 순서로 보여 준다(sessions·groups 순서). 아니면 가나다순.
+    #[serde(default)]
+    pub manual_order: bool,
+}
+
+/// 사이드바에서 세션 하나의 자리: 순서대로 늘어놓은 세션과 그 그룹
+#[derive(Deserialize, Debug, Clone)]
+pub struct SessionPlace {
+    pub id: String,
+    pub group: Option<String>,
 }
 
 fn check_group_name(name: &str) -> std::result::Result<String, String> {
@@ -300,6 +310,45 @@ impl VaultData {
             }
         }
         out
+    }
+
+    /// 사이드바 순서를 통째로 정한다. 목록에 없는 세션·그룹은 뒤에 그대로 남긴다.
+    pub fn reorder(&mut self, groups: &[String], places: &[SessionPlace]) -> std::result::Result<(), String> {
+        let groups = groups
+            .iter()
+            .map(|g| check_group_name(g))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rest = std::mem::take(&mut self.sessions);
+        let mut sessions = Vec::with_capacity(rest.len());
+        for p in places {
+            let Some(i) = rest.iter().position(|s| s.id == p.id) else {
+                continue; // 그사이 지운 세션
+            };
+            let mut s = rest.remove(i);
+            s.group = match p.group.as_deref().map(str::trim) {
+                Some(g) if !g.is_empty() => Some(check_group_name(g)?),
+                _ => None,
+            };
+            sessions.push(s);
+        }
+        sessions.append(&mut rest);
+        self.sessions = sessions;
+
+        let mut old = std::mem::take(&mut self.groups);
+        let mut ordered = Vec::with_capacity(groups.len() + old.len());
+        for name in groups {
+            if ordered.iter().any(|g: &Group| g.name == name) {
+                continue;
+            }
+            match old.iter().position(|g| g.name == name) {
+                Some(i) => ordered.push(old.remove(i)),
+                None => ordered.push(Group { name, color: None }),
+            }
+        }
+        ordered.append(&mut old);
+        self.groups = ordered;
+        self.manual_order = true;
+        Ok(())
     }
 
     /// 그룹을 만든다. 같은 이름이 이미 있으면 거절한다.
@@ -744,6 +793,37 @@ mod tests {
             has_private_key: false,
             has_passphrase: false,
         }
+    }
+
+    #[test]
+    fn reorder_sets_session_order_groups_and_group_order() {
+        let mut d = VaultData::default();
+        for (id, g) in [("a", Some("운영")), ("b", Some("개발")), ("c", None)] {
+            let mut s = sample_session(id);
+            s.group = g.map(String::from);
+            d.sessions.push(s);
+        }
+        d.groups.push(Group {
+            name: "개발".into(),
+            color: Some("blue".into()),
+        });
+        assert!(!d.manual_order);
+        let place = |id: &str, g: Option<&str>| SessionPlace {
+            id: id.into(),
+            group: g.map(String::from),
+        };
+        d.reorder(
+            &["운영".into(), "개발".into()],
+            &[place("c", Some("개발")), place("b", Some("개발")), place("x", None)],
+        )
+        .unwrap();
+        assert!(d.manual_order);
+        let ids: Vec<_> = d.sessions.iter().map(|s| (s.id.as_str(), s.group.as_deref())).collect();
+        // 목록에 없던 a는 뒤에 그대로, 없는 x는 무시
+        assert_eq!(ids, [("c", Some("개발")), ("b", Some("개발")), ("a", Some("운영"))]);
+        let groups: Vec<_> = d.groups.iter().map(|g| (g.name.as_str(), g.color.as_deref())).collect();
+        assert_eq!(groups, [("운영", None), ("개발", Some("blue"))]);
+        assert!(d.reorder(&["".into()], &[]).is_err());
     }
 
     #[test]

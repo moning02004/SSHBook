@@ -36,5 +36,5 @@ export function TerminalView({ paneId, sessionId, active }: Props) {
     if (active) getPane(paneId, sessionId).term.focus();
   }, [active, paneId, sessionId]);
 
-  return <div ref={slot} className="term-slot" />;
+  return <div ref={slot} className="term-slot" data-pane-id={paneId} />;
 }

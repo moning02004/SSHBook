@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const MASTER = "Tiger-Moon-Lake-42";
 
@@ -504,6 +504,68 @@ test("사이드바 세션을 휠 클릭하면 열린 탭이 있어도 새 탭을
   await expect(tabs).toHaveCount(2);
 });
 
+test("사이드바 세션과 그룹을 끌어서 순서와 그룹을 바꾸고, 잠갔다 열어도 남는다", async ({ page }) => {
+  await createVault(page);
+  const names = () => page.locator(".session-row .name").allTextContents();
+  const titles = () => page.locator(".group-toggle > span:nth-child(2)").allTextContents();
+  /** from을 to의 위쪽(top) 또는 아래쪽 끝 근처로 끌어다 놓는다 */
+  const drag = async (from: Locator, to: Locator, where: "top" | "bottom") => {
+    const a = (await from.boundingBox())!;
+    const b = (await to.boundingBox())!;
+    await page.mouse.move(a.x + 20, a.y + a.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(a.x + 20, a.y + a.height / 2 + 8, { steps: 3 });
+    const y = where === "top" ? b.y + 3 : b.y + b.height - 3;
+    await page.mouse.move(b.x + 20, y, { steps: 6 });
+    await page.mouse.up();
+  };
+  const row = (name: string) => page.locator(".session-row", { hasText: name });
+
+  await expect.poll(names).toEqual(["dev-box", "localhost", "prod-web-01"]);
+  await drag(row("prod-web-01"), row("dev-box"), "top");
+  await expect.poll(names).toEqual(["prod-web-01", "dev-box", "localhost"]);
+  // 끌어다 놓은 것은 클릭(연결)으로 치지 않는다.
+  await expect(page.locator(".gtab")).toHaveCount(0);
+
+  // 그룹 두 개를 만든다: 가나다순이면 개발 → 운영
+  const editor = page.locator(".session-editor");
+  for (const [name, group] of [["dev-box", "운영"], ["localhost", "개발"]]) {
+    await page.getByRole("button", { name: `${name} 편집` }).click();
+    await editor.getByRole("tab", { name: "표시" }).click();
+    await editor.getByRole("combobox", { name: "그룹" }).fill(group);
+    await editor.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(editor).toHaveCount(0);
+  }
+  await expect.poll(async () => (await titles()).length).toBe(3);
+  const before = await titles();
+  expect(before.slice(0, 2).sort()).toEqual(["개발", "운영"]);
+
+  // 그룹 순서: 두 번째 그룹을 첫 그룹 위로
+  const title = (t: string) => page.locator(".section-title", { hasText: t });
+  await drag(title(before[1]), title(before[0]), "top");
+  await expect.poll(titles).toEqual([before[1], before[0], "그룹 없음"]);
+  // 그룹 바꾸기: prod-web-01을 '개발' 그룹 제목 위에 놓으면 그 그룹 끝으로
+  await drag(row("prod-web-01"), title("개발"), "bottom");
+  await expect.poll(titles).toEqual([before[1], before[0]]);
+  await expect(page.locator('[data-group="개발"] .session-row .name')).toHaveText(["localhost", "prod-web-01"]);
+
+  // 검색 중에는 끌지 않는다
+  await page.getByPlaceholder("세션 검색").fill("o");
+  const snapshot = await names();
+  await drag(row("localhost"), row("dev-box"), "top");
+  await expect.poll(names).toEqual(snapshot);
+  await page.getByPlaceholder("세션 검색").fill("");
+
+  // 탭이 없으면 확인 없이 바로 잠근다.
+  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("tab", { name: "보안" }).click();
+  await page.getByRole("button", { name: "잠그기", exact: true }).click();
+  await page.locator('input[type="password"]').fill(MASTER);
+  await page.getByRole("button", { name: "잠금 해제", exact: true }).click();
+  await expect.poll(titles).toEqual([before[1], before[0]]);
+  await expect(page.locator('[data-group="개발"] .session-row .name')).toHaveText(["localhost", "prod-web-01"]);
+});
+
 test("세션 오른쪽 클릭 메뉴에서 세션을 제거한다", async ({ page }) => {
   await createVault(page);
   await page.locator(".session-row", { hasText: "prod-web-01" }).click({ button: "right" });
@@ -595,6 +657,39 @@ test("설정의 기본 로컬 셸(WSL)로 로컬 셸 탭을 연다", async ({ pa
   expect(shells).toEqual([]);
   await page.getByRole("button", { name: "이 칸에 새 탭 (로컬 셸)" }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __seen: unknown[] }).__seen)).toEqual(["wsl.exe -d Ubuntu-24.04"]);
+});
+
+test("셸 출력의 링크를 누르면 브라우저로 연다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  await page.keyboard.type("link");
+  await page.keyboard.press("Enter");
+  const row = page.locator(".xterm-rows").last().locator("> div", { hasText: "https://example.com/docs" });
+  await expect(row).toBeVisible();
+  const box = (await row.boundingBox())!;
+  // 링크 위로 마우스를 옮긴 뒤 누른다.
+  await page.mouse.move(box.x + 40, box.y + box.height / 2);
+  await page.mouse.move(box.x + 60, box.y + box.height / 2);
+  await page.mouse.click(box.x + 60, box.y + box.height / 2);
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __openedUrls?: string[] }).__openedUrls ?? []))
+    .toEqual(["https://example.com/docs?a=1&b=2"]);
+});
+
+test("로컬 셸에 파일을 끌어다 놓으면 경로를 넣는다", async ({ page }) => {
+  await createVault(page);
+  await openLocal(page);
+  const slot = page.locator(".term-slot").first();
+  const box = (await slot.boundingBox())!;
+  await page.evaluate(
+    ([x, y]) =>
+      (window as unknown as { __sshbookDropFiles: (x: number, y: number, p: string[]) => Promise<void> }).__sshbookDropFiles(x, y, [
+        "/Users/me/a.txt",
+        "/Users/me/내 문서.txt",
+      ]),
+    [box.x + box.width / 2, box.y + box.height / 2],
+  );
+  await expect(page.locator(".xterm-rows").first()).toContainText("/Users/me/a.txt '/Users/me/내 문서.txt'");
 });
 
 test("탭을 휠 클릭하면 닫는다", async ({ page }) => {

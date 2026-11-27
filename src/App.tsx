@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from "react";
 import { ConfirmClose } from "./components/ConfirmClose";
 import { SettingsDialog, useSettings } from "./components/SettingsDialog";
@@ -21,7 +22,7 @@ import { pickExportPath } from "./lib/dialogs";
 import { sideAt, type DropSide, type SplitDir } from "./lib/layout";
 import * as desks from "./lib/groups";
 import { emptyDesk, type Desk, type TabDrop } from "./lib/groups";
-import { describeSession, type Group, type Session, type Snippet } from "./lib/sessions";
+import { describeSession, type Group, type Session, type SidebarLayout, type Snippet } from "./lib/sessions";
 import * as terms from "./lib/terminals";
 import { applyTheme, loadTheme, type ThemeName } from "./lib/theme";
 import { tx } from "./lib/i18n";
@@ -109,6 +110,8 @@ export function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   /** 미리 만든 그룹과 그룹 색. 세션 목록이 바뀔 때마다 다시 읽는다. */
   const [groupInfos, setGroupInfos] = useState<Group[]>([]);
+  // 사이드바를 끌어서 정한 순서로 보여 주는지(아니면 가나다순)
+  const [sidebarManual, setSidebarManual] = useState(false);
   // 분할된 칸들과 칸마다의 탭(파이참 에디터 분할처럼)
   const [desk, setDesk] = useState<Desk>(emptyDesk);
   const [panes, setPanes] = useState<Record<string, PaneInfo>>({});
@@ -344,6 +347,9 @@ export function App() {
 
   const activeLive = !!activeId && terms.paneStatus(activeId) !== "closed";
 
+  // 터미널 링크를 열지 못하면 알림줄에 보인다.
+  useEffect(() => terms.setLinkErrorHandler((m) => setNotice(tx("링크를 열지 못했습니다: {0}", m))), []);
+
   // 단축키: xterm이 먹지 않게 걸러내고, 창(window)에서 처리한다.
   useEffect(() => {
     const actionOf = (e: KeyboardEvent) => shortcutOf(e) ?? reconnectShortcutOf(e, activeLive);
@@ -545,6 +551,45 @@ export function App() {
   // 앱 창을 닫을 때도 연결된 세션이 있으면 묻는다.
   const closeGuard = useRef({ ask: askOnClose, panes });
   closeGuard.current = { ask: askOnClose, panes };
+
+  // 로컬 셸에 파일을 끌어다 놓으면 그 경로를 넣는다(macOS 터미널처럼). 파일 창(SFTP) 위면 그쪽이 올린다.
+  useEffect(() => {
+    let over: HTMLElement | null = null;
+    const slotAt = (x: number, y: number) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null;
+      if (!el || el.closest(".sftp")) return null;
+      return el.closest<HTMLElement>(".term-slot[data-pane-id]");
+    };
+    const mark = (slot: HTMLElement | null) => {
+      if (over === slot) return;
+      over?.classList.remove("file-over");
+      over = slot;
+      over?.classList.add("file-over");
+    };
+    const dropAt = async (x: number, y: number, paths: string[]) => {
+      mark(null);
+      const slot = slotAt(x, y);
+      if (slot?.dataset.paneId) await terms.dropPaths(slot.dataset.paneId, paths);
+    };
+    if (!inTauri) {
+      // 브라우저 미리보기·E2E용
+      (window as unknown as { __sshbookDropFiles?: typeof dropAt }).__sshbookDropFiles = dropAt;
+      return;
+    }
+    const un = getCurrentWebview().onDragDropEvent((ev) => {
+      const p = ev.payload;
+      if (p.type === "leave") return mark(null);
+      const s = window.devicePixelRatio || 1;
+      const x = p.position.x / s;
+      const y = p.position.y / s;
+      if (p.type === "drop") void dropAt(x, y, p.paths);
+      else mark(slotAt(x, y));
+    });
+    return () => {
+      mark(null);
+      void un.then((f) => f());
+    };
+  }, []);
   useEffect(() => {
     if (!inTauri) return;
     const w = getCurrentWindow();
@@ -582,9 +627,12 @@ export function App() {
   useEffect(() => {
     if (!unlocked) return setGroupInfos([]);
     let live = true;
-    api
-      .groupsList()
-      .then((g) => live && setGroupInfos(g))
+    Promise.all([api.groupsList(), api.sidebarManual()])
+      .then(([g, m]) => {
+        if (!live) return;
+        setGroupInfos(g);
+        setSidebarManual(m);
+      })
       .catch(() => {});
     return () => {
       live = false;
@@ -599,9 +647,31 @@ export function App() {
     [groupInfos, sessions],
   );
   const reloadSessions = async () => {
-    const [list, g] = await Promise.all([api.sessionsList(), api.groupsList()]);
+    const [list, g, m] = await Promise.all([api.sessionsList(), api.groupsList(), api.sidebarManual()]);
     setSessions(list);
     setGroupInfos(g);
+    setSidebarManual(m);
+  };
+  // 사이드바에서 끌어 놓은 순서: 화면을 먼저 바꾸고 저장한다.
+  const reorderSidebar = async (layout: SidebarLayout) => {
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+    const placed = layout.sessions.flatMap((p) => {
+      const s = byId.get(p.id);
+      return s ? [{ ...s, group: p.group }] : [];
+    });
+    setSessions([...placed, ...sessions.filter((s) => !layout.sessions.some((p) => p.id === s.id))]);
+    const info = new Map(groupInfos.map((g) => [g.name, g]));
+    setGroupInfos([
+      ...layout.groups.map((name) => info.get(name) ?? { name, color: null }),
+      ...groupInfos.filter((g) => !layout.groups.includes(g.name)),
+    ]);
+    setSidebarManual(true);
+    try {
+      await api.sidebarReorder(layout.groups, layout.sessions);
+    } catch (e) {
+      setNotice(tx("순서를 저장하지 못했습니다: {0}", errorText(e)));
+    }
+    await reloadSessions().catch(() => {});
   };
   // 연결이 살아 있는 창이 하나라도 있는 세션
   const connected = new Set(
@@ -816,6 +886,8 @@ export function App() {
           <Sidebar
             sessions={sessions}
             groups={groupInfos}
+            manualOrder={sidebarManual}
+            onReorder={reorderSidebar}
             connected={connected}
             selectedId={activeInfo?.sessionId ?? null}
             onOpen={(s) => showSession(s.id)}
